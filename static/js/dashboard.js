@@ -19,9 +19,14 @@ let layers = {
   villages: L.layerGroup(),
   villageDanger: L.layerGroup(),
   traumaCenters: L.layerGroup(),
-  incidents: L.layerGroup()
+  incidents: L.layerGroup(),
+  reportedAccidents: L.layerGroup(),
+  publicRecommendations: L.layerGroup()
 };
 
+let currentUser = null;
+let allReportedAccidents = [];
+let allPublicRecommendations = [];
 let currentBlackspots = [];
 let currentOptimalStations = [];
 let currentReadyStations = [];
@@ -161,6 +166,20 @@ function setupEventListeners() {
   });
 
   // Layer toggles
+  const layerReportedAccidentsEl = document.getElementById("layer-reported-accidents");
+  if (layerReportedAccidentsEl) {
+    layerReportedAccidentsEl.addEventListener("change", (e) => {
+      toggleLayer(layers.reportedAccidents, e.target.checked);
+    });
+  }
+
+  const layerPublicRecsEl = document.getElementById("layer-public-recommendations");
+  if (layerPublicRecsEl) {
+    layerPublicRecsEl.addEventListener("change", (e) => {
+      toggleLayer(layers.publicRecommendations, e.target.checked);
+    });
+  }
+
   const layerManualAmbsEl = document.getElementById("layer-manual-ambulances");
   if (layerManualAmbsEl) {
     layerManualAmbsEl.addEventListener("change", (e) => {
@@ -298,8 +317,15 @@ function toggleLayer(layer, isVisible) {
 
 async function loadInitialData() {
   try {
+    // Check role authentication status
+    await checkCurrentUser();
+
     // 0. Load Permanent Manually Placed Ambulances from Server & localStorage
     await loadManualAmbulances();
+
+    // Load Public Citizen Recommendations & Live Reported Road Accidents
+    await loadPublicRecommendations();
+    await loadReportedAccidents();
 
     // 1. Load Trauma Centers
     const traumaRes = await fetch("/api/trauma_centers");
@@ -804,6 +830,12 @@ function renderVillageDangerSpots(dangerSpots) {
 }
 
 async function placeAmbulanceNearer(lat, lng, locationLabel = "Danger Spot", district = "General", mandal = "Local") {
+  // Role Protection: Only Officers & Higher Authorities can manually reposition fleet units
+  if (!currentUser || currentUser.role !== "officer") {
+    openRestrictedNotice("place");
+    return;
+  }
+
   try {
     const res = await fetch("/api/place_ambulance_nearer", {
       method: "POST",
@@ -817,6 +849,11 @@ async function placeAmbulanceNearer(lat, lng, locationLabel = "Danger Spot", dis
       })
     });
 
+    if (res.status === 403) {
+      openRestrictedNotice("place");
+      return;
+    }
+
     const data = await res.json();
     if (data.status === "success" && data.station) {
       const stn = data.station;
@@ -826,6 +863,10 @@ async function placeAmbulanceNearer(lat, lng, locationLabel = "Danger Spot", dis
 
       // Trigger instant accident dispatch at this spot to show immediate < 2 min response!
       handleAccidentReport(lat, lng, `${locationLabel} (Nearer Ambulance Deployed)`, district, mandal);
+    } else if (data.status === "restricted") {
+      openRestrictedNotice("place");
+    } else {
+      alert(data.message || "Could not position ambulance.");
     }
   } catch (err) {
     console.error("Error placing ambulance nearer:", err);
@@ -858,13 +899,15 @@ async function loadManualAmbulances() {
         try {
           const parsed = JSON.parse(cached);
           if (Array.isArray(parsed) && parsed.length > 0) {
-            // Re-sync back to server
-            for (const amb of parsed) {
-              await fetch("/api/manual_ambulances", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(amb)
-              });
+            // Re-sync back to server if officer
+            if (currentUser && currentUser.role === "officer") {
+              for (const amb of parsed) {
+                await fetch("/api/manual_ambulances", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify(amb)
+                });
+              }
             }
             customAmbulances = parsed;
           }
@@ -877,8 +920,13 @@ async function loadManualAmbulances() {
   }
 }
 
-// Deletes a manually placed ambulance from disk and memory
+// Deletes a manually placed ambulance from disk and memory (Officer only)
 async function deleteManualAmbulance(stationId) {
+  if (!currentUser || currentUser.role !== "officer") {
+    openRestrictedNotice("delete");
+    return;
+  }
+
   const target = customAmbulances.find(a => a.station_id === stationId || a.ambulance_id === stationId);
   const name = target ? target.name : "this custom 108 ambulance station";
   if (!confirm(`Are you sure you want to permanently delete ${name}?`)) {
@@ -888,6 +936,10 @@ async function deleteManualAmbulance(stationId) {
     const res = await fetch(`/api/manual_ambulances/${encodeURIComponent(stationId)}`, {
       method: "DELETE"
     });
+    if (res.status === 403) {
+      openRestrictedNotice("delete");
+      return;
+    }
     const data = await res.json();
     if (data.status === "success") {
       customAmbulances = customAmbulances.filter(a => a.station_id !== stationId && a.ambulance_id !== stationId);
@@ -895,14 +947,21 @@ async function deleteManualAmbulance(stationId) {
         localStorage.setItem("ap_manual_ambulances", JSON.stringify(customAmbulances));
       } catch (e) {}
       renderManualAmbulances(customAmbulances);
+    } else {
+      alert(data.message || "Failed to delete ambulance.");
     }
   } catch (err) {
     console.error("Error deleting manual ambulance:", err);
   }
 }
 
-// Deletes all manually placed ambulances
+// Deletes all manually placed ambulances (Officer only)
 async function deleteAllManualAmbulances() {
+  if (!currentUser || currentUser.role !== "officer") {
+    openRestrictedNotice("deleteAll");
+    return;
+  }
+
   if (!customAmbulances || customAmbulances.length === 0) return;
   if (!confirm(`Are you sure you want to permanently delete all ${customAmbulances.length} manually placed ambulances?`)) {
     return;
@@ -1630,6 +1689,905 @@ function scrollToManualPanel() {
   }
 }
 
+// ==========================================================================
+// Role-Based Access Control (RBAC) & Authentication Logic
+// ==========================================================================
+
+async function checkCurrentUser() {
+  try {
+    const res = await fetch("/api/auth/current_user");
+    const data = await res.json();
+    if (data.status === "success" && data.user) {
+      currentUser = data.user;
+    } else {
+      currentUser = null;
+    }
+    updateUserUI();
+  } catch (e) {
+    console.error("Error checking current user:", e);
+    currentUser = null;
+    updateUserUI();
+  }
+}
+
+function updateUserUI() {
+  const statusContainer = document.getElementById("header-user-status");
+  const officerConsoleBtn = document.getElementById("btn-header-officer-console");
+  
+  if (!statusContainer) return;
+
+  if (currentUser && currentUser.role === "officer") {
+    // Show Officer badge & controls
+    statusContainer.innerHTML = `
+      <div class="user-profile-badge badge-officer" title="Logged in as Command Center Authority">
+        <span class="user-role-tag"><i class="fa-solid fa-shield-halved"></i> Officer</span>
+        <span class="user-display-name">${currentUser.name || currentUser.username}</span>
+        <button class="btn-logout" onclick="handleLogout()" title="Sign out of Command Console">
+          <i class="fa-solid fa-right-from-bracket"></i>
+        </button>
+      </div>
+    `;
+    if (officerConsoleBtn) officerConsoleBtn.style.display = "inline-flex";
+  } else if (currentUser && currentUser.role === "public") {
+    // Show Citizen badge & controls
+    statusContainer.innerHTML = `
+      <div class="user-profile-badge badge-citizen" title="Logged in as Public Citizen">
+        <span class="user-role-tag"><i class="fa-solid fa-user"></i> Citizen</span>
+        <span class="user-display-name">${currentUser.name || currentUser.username}</span>
+        <button class="btn-logout" onclick="handleLogout()" title="Sign out of Public Portal">
+          <i class="fa-solid fa-right-from-bracket"></i>
+        </button>
+      </div>
+    `;
+    if (officerConsoleBtn) officerConsoleBtn.style.display = "none";
+  } else {
+    // Guest Mode
+    statusContainer.innerHTML = `
+      <button class="btn-header-action btn-accent-green" id="btn-header-login" onclick="openAuthModal()">
+        <i class="fa-solid fa-right-to-bracket"></i> Sign In / Role
+      </button>
+    `;
+    if (officerConsoleBtn) officerConsoleBtn.style.display = "none";
+  }
+}
+
+let currentAuthMode = "signin";
+let currentAuthRole = "officer";
+
+function openAuthModal(preferredRole = "officer", preferredMode = "signin") {
+  const modal = document.getElementById("modal-auth");
+  if (modal) {
+    modal.classList.add("active");
+    switchAuthMode(preferredMode);
+    switchAuthRole(preferredRole);
+  }
+}
+
+function closeAuthModal() {
+  const modal = document.getElementById("modal-auth");
+  if (modal) modal.classList.remove("active");
+}
+
+function switchAuthMode(mode) {
+  currentAuthMode = mode;
+  const signinBtn = document.getElementById("btn-mode-signin");
+  const signupBtn = document.getElementById("btn-mode-signup");
+  const signinContainer = document.getElementById("auth-signin-container");
+  const signupContainer = document.getElementById("auth-signup-container");
+  const modalTitle = document.getElementById("auth-modal-title");
+
+  if (mode === "signup") {
+    if (signinBtn) signinBtn.classList.remove("active");
+    if (signupBtn) signupBtn.classList.add("active");
+    if (signinContainer) signinContainer.style.display = "none";
+    if (signupContainer) signupContainer.style.display = "block";
+    if (modalTitle) modalTitle.innerHTML = '<i class="fa-solid fa-user-plus" style="color:#38bdf8;"></i> Create New Account';
+  } else {
+    if (signinBtn) signinBtn.classList.add("active");
+    if (signupBtn) signupBtn.classList.remove("active");
+    if (signinContainer) signinContainer.style.display = "block";
+    if (signupContainer) signupContainer.style.display = "none";
+    if (modalTitle) modalTitle.innerHTML = '<i class="fa-solid fa-id-card-clip" style="color:#38bdf8;"></i> Portal Login & Access';
+  }
+  // Refresh sections for current role
+  switchAuthRole(currentAuthRole);
+}
+
+function switchAuthRole(role) {
+  currentAuthRole = role;
+  const officerBtn = document.getElementById("tab-officer-btn");
+  const publicBtn = document.getElementById("tab-public-btn");
+
+  const signinOfficer = document.getElementById("signin-officer-section");
+  const signinPublic = document.getElementById("signin-public-section");
+  const signupOfficer = document.getElementById("signup-officer-section");
+  const signupPublic = document.getElementById("signup-public-section");
+
+  if (role === "public") {
+    if (officerBtn) officerBtn.classList.remove("active-officer");
+    if (publicBtn) publicBtn.classList.add("active-public");
+
+    if (signinOfficer) signinOfficer.style.display = "none";
+    if (signinPublic) signinPublic.style.display = "block";
+    if (signupOfficer) signupOfficer.style.display = "none";
+    if (signupPublic) signupPublic.style.display = "block";
+  } else {
+    if (officerBtn) officerBtn.classList.add("active-officer");
+    if (publicBtn) publicBtn.classList.remove("active-public");
+
+    if (signinOfficer) signinOfficer.style.display = "block";
+    if (signinPublic) signinPublic.style.display = "none";
+    if (signupOfficer) signupOfficer.style.display = "block";
+    if (signupPublic) signupPublic.style.display = "none";
+  }
+}
+
+function switchAuthTab(tab) {
+  switchAuthRole(tab);
+}
+
+async function handleOfficerLogin(e) {
+  if (e) e.preventDefault();
+  const username = document.getElementById("officer-username")?.value.trim();
+  const password = document.getElementById("officer-password")?.value;
+
+  if (!username || !password) {
+    alert("Please enter both Officer ID / Mail ID and password.");
+    return;
+  }
+
+  try {
+    const res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, role: "officer" })
+    });
+    const data = await res.json();
+    if (data.status === "success") {
+      currentUser = data.user;
+      updateUserUI();
+      closeAuthModal();
+      loadOfficerConsoleData();
+      alert(`Welcome, Officer ${data.user.name || username}! Command authorization granted.`);
+    } else {
+      alert(`Login failed: ${data.message || 'Invalid officer credentials'}`);
+    }
+  } catch (err) {
+    console.error("Officer login error:", err);
+    alert("Connection error during login. Please try again.");
+  }
+}
+
+async function handlePublicLogin(e) {
+  if (e) e.preventDefault();
+  const username = document.getElementById("public-username")?.value.trim();
+  const password = document.getElementById("public-password")?.value;
+
+  if (!username || !password) {
+    alert("Please enter both Mobile Number / Mail ID and password.");
+    return;
+  }
+
+  try {
+    const res = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, role: "public" })
+    });
+    const data = await res.json();
+    if (data.status === "success") {
+      currentUser = data.user;
+      updateUserUI();
+      closeAuthModal();
+      alert(`Welcome, ${data.user.name || username}! You can now recommend ambulance positioning and report accidents.`);
+    } else {
+      alert(`Login failed: ${data.message || 'Error logging in'}`);
+    }
+  } catch (err) {
+    console.error("Public login error:", err);
+    alert("Connection error during login. Please try again.");
+  }
+}
+
+async function handleOfficerRegister(e) {
+  if (e) e.preventDefault();
+  const name = document.getElementById("reg-officer-name")?.value.trim();
+  const email = document.getElementById("reg-officer-email")?.value.trim();
+  const phone = document.getElementById("reg-officer-phone")?.value.trim();
+  const officer_id = document.getElementById("reg-officer-id")?.value.trim();
+  const password = document.getElementById("reg-officer-password")?.value;
+
+  if (!name || !email || !phone || !officer_id || !password) {
+    alert("Please fill in all required registration fields (Full Name, Mail ID, Mobile Number, Officer ID, Password).");
+    return;
+  }
+
+  try {
+    const res = await fetch("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        role: "officer",
+        name,
+        email,
+        phone,
+        officer_id,
+        password
+      })
+    });
+    const data = await res.json();
+    if (data.status === "success") {
+      currentUser = data.user;
+      updateUserUI();
+      closeAuthModal();
+      loadOfficerConsoleData();
+      alert(`✅ Registration successful! Welcome, Officer ${name}. You now have full fleet command authority.`);
+    } else {
+      alert(`Registration failed: ${data.message || 'Could not register officer.'}`);
+    }
+  } catch (err) {
+    console.error("Officer register error:", err);
+    alert("Connection error during registration. Please try again.");
+  }
+}
+
+async function handlePublicRegister(e) {
+  if (e) e.preventDefault();
+  const name = document.getElementById("reg-public-name")?.value.trim();
+  const email = document.getElementById("reg-public-email")?.value.trim();
+  const phone = document.getElementById("reg-public-phone")?.value.trim();
+  const password = document.getElementById("reg-public-password")?.value;
+
+  if (!name || !email || !phone || !password) {
+    alert("Please fill in all required registration fields (Full Name, Mail ID, Mobile Number, Password).");
+    return;
+  }
+
+  try {
+    const res = await fetch("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        role: "public",
+        name,
+        email,
+        phone,
+        password
+      })
+    });
+    const data = await res.json();
+    if (data.status === "success") {
+      currentUser = data.user;
+      updateUserUI();
+      closeAuthModal();
+      alert(`✅ Registration successful! Welcome, ${name}. You can now submit ambulance recommendations and report road accidents.`);
+    } else {
+      alert(`Registration failed: ${data.message || 'Could not register citizen account.'}`);
+    }
+  } catch (err) {
+    console.error("Public register error:", err);
+    alert("Connection error during registration. Please try again.");
+  }
+}
+
+async function handleLogout() {
+  try {
+    await fetch("/api/auth/logout", { method: "POST" });
+  } catch (e) {}
+  currentUser = null;
+  updateUserUI();
+}
+
+// ==========================================================================
+// Public Citizen Ambulance Recommendations
+// ==========================================================================
+
+function openRecommendModal() {
+  const modal = document.getElementById("modal-recommend-ambulance");
+  if (!modal) return;
+  modal.classList.add("active");
+
+  // Pre-fill user details if logged in
+  if (currentUser) {
+    const nameInput = document.getElementById("rec-name");
+    const phoneInput = document.getElementById("rec-phone");
+    if (nameInput && currentUser.name) nameInput.value = currentUser.name;
+    if (phoneInput && currentUser.phone) phoneInput.value = currentUser.phone;
+  }
+
+  // Pre-fill lat/lng with current map center
+  const center = map.getCenter();
+  const latInput = document.getElementById("rec-lat");
+  const lngInput = document.getElementById("rec-lng");
+  if (latInput) latInput.value = center.lat.toFixed(5);
+  if (lngInput) lngInput.value = clampCoastline(center.lat, center.lng).toFixed(5);
+
+  populateMandalsForRec();
+}
+
+function closeRecommendModal() {
+  const modal = document.getElementById("modal-recommend-ambulance");
+  if (modal) modal.classList.remove("active");
+}
+
+function populateMandalsForRec() {
+  const distSelect = document.getElementById("rec-district");
+  const mandalSelect = document.getElementById("rec-mandal");
+  if (!distSelect || !mandalSelect) return;
+
+  const selectedDist = distSelect.value;
+  const filteredMandals = allMandals.filter(m => matchDistrict(m.district, selectedDist));
+
+  mandalSelect.innerHTML = '<option value="General">All / General Mandal</option>';
+  filteredMandals.forEach(m => {
+    const opt = document.createElement("option");
+    opt.value = m.mandal_name;
+    opt.textContent = `${m.mandal_name} Mandal`;
+    mandalSelect.appendChild(opt);
+  });
+}
+
+function useMapCenterForRec() {
+  const center = map.getCenter();
+  const latInput = document.getElementById("rec-lat");
+  const lngInput = document.getElementById("rec-lng");
+  if (latInput) latInput.value = center.lat.toFixed(5);
+  if (lngInput) lngInput.value = clampCoastline(center.lat, center.lng).toFixed(5);
+}
+
+async function handleRecommendationSubmit(e) {
+  if (e) e.preventDefault();
+  const district = document.getElementById("rec-district")?.value || "General";
+  const mandal = document.getElementById("rec-mandal")?.value || "General";
+  const village = document.getElementById("rec-village")?.value.trim();
+  const lat = parseFloat(document.getElementById("rec-lat")?.value);
+  const lng = parseFloat(document.getElementById("rec-lng")?.value);
+  const vehicleTier = document.getElementById("rec-vehicle-type")?.value || "Basic Life Support (BLS)";
+  const reason = document.getElementById("rec-reason")?.value.trim();
+  const citizenName = document.getElementById("rec-name")?.value.trim();
+  const citizenPhone = document.getElementById("rec-phone")?.value.trim();
+
+  if (!village || isNaN(lat) || isNaN(lng) || !reason) {
+    alert("Please fill in all required fields.");
+    return;
+  }
+
+  try {
+    const res = await fetch("/api/public/recommendations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        district,
+        mandal,
+        village_or_junction: village,
+        lat,
+        lng,
+        vehicle_tier: vehicleTier,
+        reason,
+        citizen_name: citizenName,
+        citizen_phone: citizenPhone
+      })
+    });
+    const data = await res.json();
+    if (data.status === "success") {
+      closeRecommendModal();
+      alert("✅ Your 108 ambulance recommendation has been submitted to the Command Center Officers for verification!");
+      await loadPublicRecommendations();
+    } else {
+      alert("Submission error: " + (data.message || "Could not submit recommendation."));
+    }
+  } catch (err) {
+    console.error("Recommendation submission error:", err);
+    alert("Connection error while submitting recommendation.");
+  }
+}
+
+async function loadPublicRecommendations() {
+  try {
+    const res = await fetch("/api/public/recommendations");
+    const data = await res.json();
+    if (data.status === "success" && Array.isArray(data.recommendations)) {
+      allPublicRecommendations = data.recommendations;
+    } else {
+      allPublicRecommendations = [];
+    }
+    
+    // Update badge & legend counters
+    const legendRecCount = document.getElementById("legend-rec-count");
+    if (legendRecCount) legendRecCount.textContent = allPublicRecommendations.length;
+
+    const pendingCount = allPublicRecommendations.filter(r => (r.status || "").toLowerCase().includes("pending")).length;
+    const consoleBadge = document.getElementById("console-rec-count");
+    if (consoleBadge) consoleBadge.textContent = pendingCount;
+    updateOfficerNotificationBadge();
+
+    renderPublicRecommendationsMap(allPublicRecommendations);
+  } catch (e) {
+    console.error("Error loading public recommendations:", e);
+  }
+}
+
+function renderPublicRecommendationsMap(recs) {
+  layers.publicRecommendations.clearLayers();
+  if (!recs || recs.length === 0) return;
+
+  recs.forEach(rec => {
+    const safeLng = clampCoastline(rec.lat, rec.lng);
+    const recId = rec.rec_id || rec.id;
+    const isPending = (rec.status || "").toLowerCase().includes("pending");
+    const isApproved = (rec.status || "").toLowerCase().includes("approved");
+    const markerColor = isApproved ? "#10b981" : (isPending ? "#ca8a04" : "#94a3b8");
+
+    const icon = L.divIcon({
+      className: "custom-div-icon",
+      html: `
+        <div style="background:${markerColor}; width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#fff; border:2px solid #fff; box-shadow:0 0 10px ${markerColor};">
+          <i class="fa-solid fa-lightbulb" style="font-size:13px;"></i>
+        </div>
+      `,
+      iconSize: [28, 28],
+      iconAnchor: [14, 14]
+    });
+
+    const marker = L.marker([rec.lat, safeLng], { icon: icon });
+    marker.bindTooltip(`<b>💡 Suggestion: ${rec.village_or_junction}</b> <small>(${rec.status.toUpperCase()})</small>`, {
+      direction: "top",
+      className: "bold-map-label"
+    });
+
+    let actionButtons = "";
+    if (currentUser && currentUser.role === "officer" && isPending) {
+      actionButtons = `
+        <div style="margin-top:8px; display:flex; gap:6px;">
+          <button onclick="approveCitizenRecommendation('${recId}')" style="flex:1; background:#10b981; color:#fff; border:none; border-radius:4px; padding:6px 8px; font-size:11px; font-weight:700; cursor:pointer;">
+            <i class="fa-solid fa-check"></i> Approve & Deploy
+          </button>
+          <button onclick="rejectCitizenRecommendation('${recId}')" style="background:#fee2e2; color:#991b1b; border:1px solid #f87171; border-radius:4px; padding:6px 8px; font-size:11px; font-weight:700; cursor:pointer;">
+            <i class="fa-solid fa-xmark"></i> Reject
+          </button>
+        </div>
+      `;
+    }
+
+    const recVillage = rec.village_or_junction || rec.village || 'Recommended Base';
+    const recTier = rec.vehicle_tier || rec.vehicle_type || 'ALS';
+    const recCitizen = rec.citizen_name || rec.reporter_name || 'Public Citizen';
+    const recPhone = rec.citizen_phone || rec.reporter_phone || '--';
+
+    marker.bindPopup(`
+      <div style="font-family:'Inter', sans-serif; font-size:12px; color:#0f172a; min-width:220px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+          <strong style="color:${markerColor}; font-size:13px;"><i class="fa-solid fa-lightbulb"></i> Citizen Recommendation</strong>
+          <span style="font-size:10px; font-weight:700; padding:2px 6px; border-radius:4px; background:${isApproved ? '#dcfce7' : (isPending ? '#fef3c7' : '#f1f5f9')}; color:${isApproved ? '#15803d' : (isPending ? '#b45309' : '#64748b')};">${(rec.status || 'PENDING').toUpperCase()}</span>
+        </div>
+        <strong>Location:</strong> ${recVillage}<br>
+        <strong>Mandal:</strong> ${rec.mandal} | <strong>District:</strong> ${rec.district}<br>
+        <strong>Tier:</strong> ${recTier}<br>
+        <strong>Citizen:</strong> ${recCitizen} (${recPhone})<br>
+        <div style="margin-top:6px; padding:4px 6px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:4px; font-size:11px;">
+          <strong>Justification:</strong> ${rec.reason}
+        </div>
+        ${actionButtons}
+      </div>
+    `);
+
+    layers.publicRecommendations.addLayer(marker);
+  });
+}
+
+// ==========================================================================
+// Public Citizen Road Accident Reporting
+// ==========================================================================
+
+function openReportAccidentModal() {
+  const modal = document.getElementById("modal-report-accident");
+  if (!modal) return;
+  modal.classList.add("active");
+
+  if (currentUser) {
+    const callerName = document.getElementById("acc-caller-name");
+    const callerPhone = document.getElementById("acc-caller-phone");
+    if (callerName && currentUser.name) callerName.value = currentUser.name;
+    if (callerPhone && currentUser.phone) callerPhone.value = currentUser.phone;
+  }
+
+  // Pre-fill coordinates with clicked location or map center
+  const target = lastIncident && lastIncident.lat ? lastIncident : map.getCenter();
+  const latInput = document.getElementById("acc-lat");
+  const lngInput = document.getElementById("acc-lng");
+  if (latInput) latInput.value = target.lat.toFixed(5);
+  if (lngInput) lngInput.value = clampCoastline(target.lat, target.lng).toFixed(5);
+}
+
+function closeReportAccidentModal() {
+  const modal = document.getElementById("modal-report-accident");
+  if (!modal) return;
+  modal.classList.remove("active");
+}
+
+function selectSeverity(level) {
+  const input = document.getElementById("acc-severity");
+  if (input) input.value = level;
+
+  document.querySelectorAll(".severity-option").forEach(el => el.classList.remove("selected"));
+  const targetId = level === "Critical" ? "sev-critical" : (level === "Serious" ? "sev-serious" : "sev-moderate");
+  const targetEl = document.getElementById(targetId);
+  if (targetEl) targetEl.classList.add("selected");
+}
+
+function useMapCenterForAccident() {
+  const center = map.getCenter();
+  const latInput = document.getElementById("acc-lat");
+  const lngInput = document.getElementById("acc-lng");
+  if (latInput) latInput.value = center.lat.toFixed(5);
+  if (lngInput) lngInput.value = clampCoastline(center.lat, center.lng).toFixed(5);
+}
+
+async function handleAccidentReportSubmit(e) {
+  if (e) e.preventDefault();
+  const location = document.getElementById("acc-location")?.value.trim();
+  const lat = parseFloat(document.getElementById("acc-lat")?.value);
+  const lng = parseFloat(document.getElementById("acc-lng")?.value);
+  const severity = document.getElementById("acc-severity")?.value || "Critical";
+  const injuredCount = parseInt(document.getElementById("acc-injured")?.value) || 1;
+  const landmark = document.getElementById("acc-landmark")?.value.trim();
+  const description = document.getElementById("acc-description")?.value.trim();
+  const callerName = document.getElementById("acc-caller-name")?.value.trim();
+  const callerPhone = document.getElementById("acc-caller-phone")?.value.trim();
+
+  if (!location || isNaN(lat) || isNaN(lng) || !callerName || !callerPhone) {
+    alert("Please fill in all required accident report fields.");
+    return;
+  }
+
+  try {
+    const res = await fetch("/api/public/report_accident", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        location_description: location,
+        lat,
+        lng,
+        severity,
+        injured_count: injuredCount,
+        landmark,
+        incident_description: description,
+        caller_name: callerName,
+        caller_phone: callerPhone
+      })
+    });
+    const data = await res.json();
+    if (data.status === "success") {
+      closeReportAccidentModal();
+      await loadReportedAccidents();
+      
+      // Pan to accident location and launch live dispatch animation
+      map.flyTo([lat, lng], 13, { duration: 1.2 });
+      handleAccidentReport(lat, lng, `🚨 Citizen Call: ${location}`, "Accident Scene", "Active Dispatch");
+      
+      const eta = data.dispatch?.response_metrics?.eta_minutes || "calculated";
+      alert(`🚨 Road accident logged successfully! Nearest 108 ambulance dispatched. Estimated ETA: ${eta} minutes.`);
+    } else {
+      alert("Error reporting accident: " + (data.message || "Failed"));
+    }
+  } catch (err) {
+    console.error("Error submitting accident report:", err);
+    alert("Network error reporting accident.");
+  }
+}
+
+async function loadReportedAccidents() {
+  try {
+    const res = await fetch("/api/reported_accidents");
+    const data = await res.json();
+    if (data.status === "success" && Array.isArray(data.accidents)) {
+      allReportedAccidents = data.accidents;
+    } else {
+      allReportedAccidents = [];
+    }
+
+    const legendAccCount = document.getElementById("legend-accident-count");
+    if (legendAccCount) legendAccCount.textContent = allReportedAccidents.length;
+
+    const activeAccidents = allReportedAccidents.filter(a => a.status === "dispatched" || a.status === "in_progress").length;
+    const consoleBadge = document.getElementById("console-acc-count");
+    if (consoleBadge) consoleBadge.textContent = activeAccidents;
+    updateOfficerNotificationBadge();
+
+    renderReportedAccidentsMap(allReportedAccidents);
+  } catch (e) {
+    console.error("Error loading reported accidents:", e);
+  }
+}
+
+function renderReportedAccidentsMap(accidents) {
+  layers.reportedAccidents.clearLayers();
+  if (!accidents || accidents.length === 0) return;
+
+  accidents.forEach(acc => {
+    const safeLng = clampCoastline(acc.lat, acc.lng);
+    const accId = acc.accident_id || acc.id;
+    const isResolved = (acc.status || "").toLowerCase().includes("resolve");
+    const isCritical = (acc.severity || "").toLowerCase().includes("critical");
+    const color = isResolved ? "#10b981" : (isCritical ? "#dc2626" : "#f97316");
+
+    const accLoc = acc.location_description || acc.location_name || "Reported Crash Scene";
+    const accCaller = acc.caller_name || acc.reporter_name || "Citizen Caller";
+    const accPhone = acc.caller_phone || acc.reporter_phone || "--";
+    const accAmbulance = acc.nearest_ambulance || acc.dispatched_ambulance;
+
+    const icon = L.divIcon({
+      className: "custom-div-icon",
+      html: `
+        <div style="background:${color}; width:30px; height:30px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#fff; border:2px solid #fff; box-shadow:0 0 12px ${color};">
+          <i class="fa-solid fa-car-burst" style="font-size:13px;"></i>
+        </div>
+      `,
+      iconSize: [30, 30],
+      iconAnchor: [15, 15]
+    });
+
+    const marker = L.marker([acc.lat, safeLng], { icon: icon });
+    marker.bindTooltip(`<b>🚨 ${accLoc}</b> <small>(${acc.severity || 'Emergency'})</small>`, {
+      direction: "top",
+      className: "bold-map-label"
+    });
+
+    let resolveButton = "";
+    if (currentUser && currentUser.role === "officer" && !isResolved) {
+      resolveButton = `
+        <button onclick="resolveReportedAccident('${accId}')" style="margin-top:8px; width:100%; background:#10b981; color:#fff; border:none; border-radius:4px; padding:6px 8px; font-size:11px; font-weight:700; cursor:pointer;">
+          <i class="fa-solid fa-check-circle"></i> Mark Accident as Resolved
+        </button>
+      `;
+    }
+
+    marker.bindPopup(`
+      <div style="font-family:'Inter', sans-serif; font-size:12px; color:#0f172a; min-width:230px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+          <strong style="color:${color}; font-size:13px;"><i class="fa-solid fa-triangle-exclamation"></i> Reported Crash</strong>
+          <span style="font-size:10px; font-weight:700; padding:2px 6px; border-radius:4px; background:${isResolved ? '#dcfce7' : '#fee2e2'}; color:${isResolved ? '#15803d' : '#991b1b'};">${(acc.status || 'ACTIVE').toUpperCase()}</span>
+        </div>
+        <strong>Location:</strong> ${accLoc}<br>
+        <strong>Severity:</strong> <span style="font-weight:700; color:${color};">${acc.severity || 'Critical'}</span> (${acc.injured_count || 1} Injured)<br>
+        <strong>Caller:</strong> ${accCaller} (${accPhone})<br>
+        ${accAmbulance ? `<strong>Assigned Unit:</strong> ${accAmbulance} (ETA: ${acc.eta_minutes || '--'} min)<br>` : ''}
+        ${acc.landmark ? `<strong>Landmark:</strong> ${acc.landmark}<br>` : ''}
+        <div style="margin-top:6px; display:flex; gap:6px;">
+          <button onclick="handleAccidentReport(${acc.lat}, ${safeLng}, '${accLoc.replace(/'/g, "\\'")}')" style="flex:1; background:#ef4444; color:#fff; border:none; border-radius:4px; padding:5px 8px; font-size:11px; font-weight:700; cursor:pointer;">
+            <i class="fa-solid fa-truck-medical"></i> View Dispatch
+          </button>
+        </div>
+        ${resolveButton}
+      </div>
+    `);
+
+    layers.reportedAccidents.addLayer(marker);
+  });
+}
+
+function updateOfficerNotificationBadge() {
+  const badge = document.getElementById("officer-badge-count");
+  if (!badge) return;
+  const pendingRecs = allPublicRecommendations.filter(r => (r.status || "").toLowerCase().includes("pending")).length;
+  const activeAccidents = allReportedAccidents.filter(a => !(a.status || "").toLowerCase().includes("resolve")).length;
+  const total = pendingRecs + activeAccidents;
+  badge.textContent = total;
+  badge.style.display = total > 0 ? "inline-block" : "none";
+}
+
+// ==========================================================================
+// Officer Command Console Actions
+// ==========================================================================
+
+function openOfficerConsoleModal() {
+  if (!currentUser || currentUser.role !== "officer") {
+    openRestrictedNotice("console");
+    return;
+  }
+  const modal = document.getElementById("modal-officer-console");
+  if (modal) {
+    modal.classList.add("active");
+    loadOfficerConsoleData();
+  }
+}
+
+function closeOfficerConsoleModal() {
+  const modal = document.getElementById("modal-officer-console");
+  if (modal) modal.classList.remove("active");
+}
+
+function switchConsoleTab(tab) {
+  const recBtn = document.getElementById("tab-console-recs-btn");
+  const accBtn = document.getElementById("tab-console-accs-btn");
+  const recsView = document.getElementById("console-recs-view");
+  const accsView = document.getElementById("console-accs-view");
+
+  if (tab === "accs") {
+    if (recBtn) recBtn.classList.remove("active-officer");
+    if (accBtn) accBtn.classList.add("active-officer");
+    if (recsView) recsView.style.display = "none";
+    if (accsView) accsView.style.display = "block";
+  } else {
+    if (recBtn) recBtn.classList.add("active-officer");
+    if (accBtn) accBtn.classList.remove("active-officer");
+    if (recsView) recsView.style.display = "block";
+    if (accsView) accsView.style.display = "none";
+  }
+}
+
+async function loadOfficerConsoleData() {
+  await loadPublicRecommendations();
+  await loadReportedAccidents();
+
+  // Render Recommendations Cards
+  const recsList = document.getElementById("console-recs-list");
+  if (recsList) {
+    if (allPublicRecommendations.length === 0) {
+      recsList.innerHTML = `<div class="places-empty-state"><p>No citizen recommendations submitted yet.</p></div>`;
+    } else {
+      recsList.innerHTML = allPublicRecommendations.map(r => {
+        const isPending = (r.status || "").toLowerCase().includes("pending");
+        const isApproved = (r.status || "").toLowerCase().includes("approved");
+        const recId = r.rec_id || r.id;
+        const rVillage = r.village_or_junction || r.village || "Recommended Base";
+        const rTier = r.vehicle_tier || r.vehicle_type || "ALS";
+        const rCitizen = r.citizen_name || r.reporter_name || "Public Citizen";
+        const rPhone = r.citizen_phone || r.reporter_phone || "N/A";
+
+        const statusBadge = isApproved ? 
+          '<span style="background:#dcfce7; color:#15803d; padding:2px 8px; border-radius:4px; font-weight:700; font-size:0.75rem;">APPROVED</span>' :
+          (isPending ? '<span style="background:#fef3c7; color:#b45309; padding:2px 8px; border-radius:4px; font-weight:700; font-size:0.75rem;">PENDING REVIEW</span>' :
+          '<span style="background:#fee2e2; color:#991b1b; padding:2px 8px; border-radius:4px; font-weight:700; font-size:0.75rem;">REJECTED</span>');
+
+        return `
+          <div class="console-card">
+            <div class="console-card-header">
+              <span class="console-card-title"><i class="fa-solid fa-location-dot" style="color:#eab308;"></i> ${rVillage}</span>
+              ${statusBadge}
+            </div>
+            <div class="console-card-meta">
+              <div><strong>District:</strong> ${r.district} | <strong>Mandal:</strong> ${r.mandal}</div>
+              <div><strong>Vehicle Tier:</strong> ${rTier}</div>
+              <div><strong>Recommended By:</strong> ${rCitizen} (${rPhone})</div>
+              <div style="margin-top:4px; font-style:italic; color:#cbd5e1;">"${r.reason}"</div>
+            </div>
+            <div class="console-card-actions">
+              <button class="btn-sm btn-primary" style="background:#38bdf8; border-color:#0284c7; color:#0f172a; font-weight:700;" onclick="focusOnPlace(${r.lat}, ${r.lng}, '${rVillage.replace(/'/g, "\\'")}', 'recommendation'); closeOfficerConsoleModal();">
+                <i class="fa-solid fa-crosshairs"></i> View on Map
+              </button>
+              ${isPending ? `
+                <button class="btn-sm btn-success" style="font-weight:700;" onclick="approveCitizenRecommendation('${recId}')">
+                  <i class="fa-solid fa-check"></i> Approve & Station 108
+                </button>
+                <button class="btn-sm btn-danger" style="font-weight:700;" onclick="rejectCitizenRecommendation('${recId}')">
+                  <i class="fa-solid fa-xmark"></i> Reject
+                </button>
+              ` : ''}
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+  }
+
+  // Render Accidents Cards
+  const accsList = document.getElementById("console-accs-list");
+  if (accsList) {
+    if (allReportedAccidents.length === 0) {
+      accsList.innerHTML = `<div class="places-empty-state"><p>No road accidents currently reported.</p></div>`;
+    } else {
+      accsList.innerHTML = allReportedAccidents.map(a => {
+        const isResolved = (a.status || "").toLowerCase().includes("resolve");
+        const accId = a.accident_id || a.id;
+        const aLoc = a.location_description || a.location_name || "Reported Crash Scene";
+        const aCaller = a.caller_name || a.reporter_name || "Citizen Caller";
+        const aPhone = a.caller_phone || a.reporter_phone || "N/A";
+        const aAmbulance = a.nearest_ambulance || a.dispatched_ambulance;
+
+        const statusBadge = isResolved ?
+          '<span style="background:#dcfce7; color:#15803d; padding:2px 8px; border-radius:4px; font-weight:700; font-size:0.75rem;">RESOLVED</span>' :
+          '<span style="background:#fee2e2; color:#ef4444; padding:2px 8px; border-radius:4px; font-weight:700; font-size:0.75rem;">DISPATCH ACTIVE</span>';
+
+        return `
+          <div class="console-card">
+            <div class="console-card-header">
+              <span class="console-card-title"><i class="fa-solid fa-car-burst" style="color:#ef4444;"></i> ${aLoc}</span>
+              ${statusBadge}
+            </div>
+            <div class="console-card-meta">
+              <div><strong>Severity:</strong> <span style="color:#f87171; font-weight:700;">${a.severity || 'Critical'}</span> | <strong>Injured:</strong> ${a.injured_count || 1} persons</div>
+              <div><strong>Caller:</strong> ${aCaller} (${aPhone})</div>
+              ${a.landmark ? `<div><strong>Landmark:</strong> ${a.landmark}</div>` : ''}
+              ${aAmbulance ? `<div><strong>Assigned 108:</strong> ${aAmbulance} (ETA: ${a.eta_minutes || '--'} min)</div>` : ''}
+            </div>
+            <div class="console-card-actions">
+              <button class="btn-sm btn-primary" style="background:#ef4444; border-color:#dc2626; color:#fff; font-weight:700;" onclick="handleAccidentReport(${a.lat}, ${a.lng}, '${aLoc.replace(/'/g, "\\'")}'); closeOfficerConsoleModal();">
+                <i class="fa-solid fa-truck-medical"></i> Dispatch Simulation
+              </button>
+              ${!isResolved ? `
+                <button class="btn-sm btn-success" style="font-weight:700;" onclick="resolveReportedAccident('${accId}')">
+                  <i class="fa-solid fa-check-circle"></i> Resolve Incident
+                </button>
+              ` : ''}
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+  }
+}
+
+async function approveCitizenRecommendation(recId) {
+  try {
+    const res = await fetch(`/api/officer/approve_recommendation/${encodeURIComponent(recId)}`, {
+      method: "POST"
+    });
+    const data = await res.json();
+    if (data.status === "success") {
+      alert("✅ Recommendation APPROVED by Command Officer! A permanent 108 ambulance base has been stationed.");
+      await loadManualAmbulances();
+      await loadOfficerConsoleData();
+    } else {
+      alert("Approval error: " + (data.message || "Failed"));
+    }
+  } catch (e) {
+    console.error("Error approving recommendation:", e);
+  }
+}
+
+async function rejectCitizenRecommendation(recId) {
+  const reason = prompt("Enter reason for rejection (optional):", "Sufficient existing coverage in sector");
+  if (reason === null) return;
+
+  try {
+    const res = await fetch(`/api/officer/reject_recommendation/${encodeURIComponent(recId)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ review_notes: reason })
+    });
+    const data = await res.json();
+    if (data.status === "success") {
+      await loadOfficerConsoleData();
+    } else {
+      alert("Error rejecting recommendation: " + (data.message || "Failed"));
+    }
+  } catch (e) {
+    console.error("Error rejecting recommendation:", e);
+  }
+}
+
+async function resolveReportedAccident(accidentId) {
+  try {
+    const res = await fetch(`/api/officer/resolve_accident/${encodeURIComponent(accidentId)}`, {
+      method: "POST"
+    });
+    const data = await res.json();
+    if (data.status === "success") {
+      alert("Accident marked as resolved.");
+      await loadOfficerConsoleData();
+    } else {
+      alert("Error resolving accident: " + (data.message || "Failed"));
+    }
+  } catch (e) {
+    console.error("Error resolving accident:", e);
+  }
+}
+
+// ==========================================================================
+// Role Restriction Dialog
+// ==========================================================================
+
+function openRestrictedNotice(action = "general") {
+  const modal = document.getElementById("modal-restricted-notice");
+  if (modal) modal.classList.add("active");
+}
+
+function closeRestrictedNotice() {
+  const modal = document.getElementById("modal-restricted-notice");
+  if (modal) modal.classList.remove("active");
+}
+
 // Global window exposure for inline Leaflet handlers
 window.placeAmbulanceNearer = placeAmbulanceNearer;
 window.saveManualAmbulance = saveManualAmbulance;
@@ -1639,5 +2597,37 @@ window.scrollToManualPanel = scrollToManualPanel;
 window.handleAccidentReport = handleAccidentReport;
 window.focusOnPlace = focusOnPlace;
 window.fitDistrictBounds = fitDistrictBounds;
+
+// RBAC & Modal exposures
+window.checkCurrentUser = checkCurrentUser;
+window.openAuthModal = openAuthModal;
+window.closeAuthModal = closeAuthModal;
+window.switchAuthMode = switchAuthMode;
+window.switchAuthRole = switchAuthRole;
+window.switchAuthTab = switchAuthTab;
+window.handleOfficerLogin = handleOfficerLogin;
+window.handlePublicLogin = handlePublicLogin;
+window.handleOfficerRegister = handleOfficerRegister;
+window.handlePublicRegister = handlePublicRegister;
+window.handleLogout = handleLogout;
+window.openRecommendModal = openRecommendModal;
+window.closeRecommendModal = closeRecommendModal;
+window.populateMandalsForRec = populateMandalsForRec;
+window.useMapCenterForRec = useMapCenterForRec;
+window.handleRecommendationSubmit = handleRecommendationSubmit;
+window.openReportAccidentModal = openReportAccidentModal;
+window.closeReportAccidentModal = closeReportAccidentModal;
+window.selectSeverity = selectSeverity;
+window.useMapCenterForAccident = useMapCenterForAccident;
+window.handleAccidentReportSubmit = handleAccidentReportSubmit;
+window.openOfficerConsoleModal = openOfficerConsoleModal;
+window.closeOfficerConsoleModal = closeOfficerConsoleModal;
+window.switchConsoleTab = switchConsoleTab;
+window.loadOfficerConsoleData = loadOfficerConsoleData;
+window.approveCitizenRecommendation = approveCitizenRecommendation;
+window.rejectCitizenRecommendation = rejectCitizenRecommendation;
+window.resolveReportedAccident = resolveReportedAccident;
+window.openRestrictedNotice = openRestrictedNotice;
+window.closeRestrictedNotice = closeRestrictedNotice;
 
 

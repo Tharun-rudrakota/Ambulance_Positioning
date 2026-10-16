@@ -1,0 +1,60 @@
+[
+  {
+    "username": "officer",
+    "password": "officer123",
+    "name": "Capt. V. Sharma",
+    "email": "v.sharma@ap108.gov.in",
+    "phone": "+91 94401 10801",
+    "officer_id": "AP-CAD-108-01",
+    "badge_id": "AP-CAD-108-01",
+    "role": "officer",
+    "designation": "Command Center Superintendent & Higher Health Authority",
+    "district": "Statewide (AP Command Center)"
+  },
+  {
+    "username": "admin",
+    "password": "admin108",
+    "name": "Dr. K. S. Rao",
+    "email": "ks.rao@aphealth.gov.in",
+    "phone": "+91 94401 10800",
+    "officer_id": "AP-GOV-HEALTH-01",
+    "badge_id": "AP-GOV-HEALTH-01",
+    "role": "officer",
+    "designation": "Principal Secretary - Health & Family Welfare",
+    "district": "Statewide"
+  },
+  {
+    "username": "citizen",
+    "password": "citizen123",
+    "name": "R. Varma",
+    "email": "r.varma@gmail.com",
+    "phone": "+91 98480 12345",
+    "role": "public",
+    "designation": "Public Citizen / Community Volunteer",
+    "district": "Guntur",
+    "mandal": "Mangalagiri"
+  },
+  {
+    "username": "public",
+    "password": "public123",
+    "name": "S. Lakshmi",
+    "email": "s.lakshmi@gmail.com",
+    "phone": "+91 98490 67890",
+    "role": "public",
+    "designation": "Public Citizen",
+    "district": "Krishna",
+    "mandal": "Vijayawada Urban"
+  },
+  {
+    "username": "AP-BB-0009",
+    "password": "alex@123",
+    "name": "alex",
+    "email": "alex@ap.gov.in",
+    "phone": "9989098789",
+    "officer_id": "AP-BB-0009",
+    "badge_id": "AP-BB-0009",
+    "role": "officer",
+    "designation": "Command Officer (AP-BB-0009)",
+    "district": "Statewide"
+  }
+]

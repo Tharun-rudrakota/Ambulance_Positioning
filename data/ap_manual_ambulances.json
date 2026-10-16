@@ -1,1 +1,46 @@
-[]
+[
+  {
+    "station_id": "RAPID-108-94613",
+    "ambulance_id": "RAPID-108-94613",
+    "name": "Guntur East Gramam Highway Junction Blackspot Rapid 108 Post",
+    "district": "Guntur",
+    "mandal": "Guntur East",
+    "lat": 16.31907,
+    "lng": 80.43723,
+    "allocated_vehicle_type": "Advanced Life Support (ALS) - Rapid Post",
+    "paramedic_crew": 3,
+    "equipment": [
+      "Ventilator",
+      "Defibrillator",
+      "Oxygen Cylinder",
+      "Stretcher",
+      "Suction Unit"
+    ],
+    "coverage_radius_km": 12.0,
+    "is_custom_nearer": true,
+    "is_manual": true,
+    "created_at": 1792163994613
+  },
+  {
+    "station_id": "RAPID-108-23084",
+    "ambulance_id": "RAPID-108-23084",
+    "name": "Incident Spot Rapid 108 Post",
+    "district": "SPS Nellore",
+    "mandal": "Nellore Rural",
+    "lat": 14.43783,
+    "lng": 79.85275,
+    "allocated_vehicle_type": "Advanced Life Support (ALS) - Rapid Post",
+    "paramedic_crew": 3,
+    "equipment": [
+      "Ventilator",
+      "Defibrillator",
+      "Oxygen Cylinder",
+      "Stretcher",
+      "Suction Unit"
+    ],
+    "coverage_radius_km": 12.0,
+    "is_custom_nearer": true,
+    "is_manual": true,
+    "created_at": 1792163823084
+  }
+]

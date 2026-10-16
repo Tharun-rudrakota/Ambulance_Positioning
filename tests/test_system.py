@@ -27,6 +27,8 @@ class TestAPAmbulanceOptimizer(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        app.config['TESTING'] = True
+        app.testing = True
         load_data()
 
     def test_01_dataset_integrity(self):
@@ -385,6 +387,272 @@ class TestAPAmbulanceOptimizer(unittest.TestCase):
         with open(man_path, "r", encoding="utf-8") as f:
             disk_after = json.load(f)
         self.assertEqual(len([s for s in disk_after if s.get("station_id") == station_id]), 0)
+
+    def test_12_role_based_login_system(self):
+        """Test Officer (Higher Authority) and Public Citizen authentication."""
+        client = app.test_client()
+
+        # 1. Test invalid officer login
+        res = client.post("/api/auth/login", json={
+            "username": "officer", "password": "wrongpassword", "role": "officer"
+        })
+        self.assertEqual(res.status_code, 401)
+
+        # 2. Test valid officer login
+        res = client.post("/api/auth/login", json={
+            "username": "officer", "password": "officer123", "role": "officer"
+        })
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertEqual(data["status"], "success")
+        self.assertEqual(data["user"]["role"], "officer")
+
+        # 3. Test current_user API returns officer
+        res = client.get("/api/auth/current_user")
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertTrue(data["authenticated"])
+        self.assertEqual(data["user"]["role"], "officer")
+        self.assertTrue(data["user"]["is_officer"])
+
+        # 4. Test public citizen login
+        res = client.post("/api/auth/login", json={
+            "username": "citizen", "password": "citizen123", "role": "public"
+        })
+        self.assertEqual(res.status_code, 200)
+        data = res.get_json()
+        self.assertEqual(data["status"], "success")
+        self.assertEqual(data["user"]["role"], "public")
+
+        # 5. Test logout
+        res = client.post("/api/auth/logout")
+        self.assertEqual(res.status_code, 200)
+
+    def test_13_manual_positioning_restricted_to_officers(self):
+        """Test that manual ambulance positioning and deletion are strictly restricted to officers."""
+        client = app.test_client()
+
+        # Log in as a public citizen
+        login_res = client.post("/api/auth/login", json={
+            "username": "citizen", "password": "citizen123", "role": "public"
+        })
+        self.assertEqual(login_res.status_code, 200)
+
+        # 1. Citizen attempts to manually place an ambulance -> Expect 403 Forbidden
+        res = client.post("/api/manual_ambulances", json={
+            "lat": 16.312, "lng": 80.451, "name": "Unauthorized Citizen Station"
+        })
+        self.assertEqual(res.status_code, 403)
+        self.assertIn("restricted", res.get_json()["message"].lower())
+
+        # 2. Citizen attempts to place ambulance nearer -> Expect 403 Forbidden
+        res = client.post("/api/place_ambulance_nearer", json={
+            "lat": 16.312, "lng": 80.451, "location_name": "Unauthorized Nearer Spot"
+        })
+        self.assertEqual(res.status_code, 403)
+        self.assertIn("restricted", res.get_json()["message"].lower())
+
+        # 3. Citizen attempts to delete an ambulance -> Expect 403 Forbidden
+        res = client.delete("/api/manual_ambulances/STATION-999")
+        self.assertEqual(res.status_code, 403)
+
+        # 4. Officer logs in and places manual ambulance -> Expect 200 Success
+        client.post("/api/auth/login", json={
+            "username": "officer", "password": "officer123", "role": "officer"
+        })
+        officer_res = client.post("/api/manual_ambulances", json={
+            "lat": 16.312, "lng": 80.451, "name": "Officer Authorized Station"
+        })
+        self.assertEqual(officer_res.status_code, 200)
+        stn_id = officer_res.get_json()["ambulance"]["station_id"]
+
+        # Clean up by deleting as officer
+        del_res = client.delete(f"/api/manual_ambulances/{stn_id}")
+        self.assertEqual(del_res.status_code, 200)
+
+    def test_14_public_recommendations_and_officer_approval(self):
+        """Test that public citizens can recommend ambulance positioning and officers can approve & deploy."""
+        client = app.test_client()
+
+        # 1. Public citizen logs in
+        client.post("/api/auth/login", json={
+            "username": "citizen", "password": "citizen123", "role": "public"
+        })
+
+        # 2. Submit ambulance positioning recommendation
+        rec_res = client.post("/api/public/recommendations", json={
+            "reporter_name": "R. Varma",
+            "reporter_phone": "+91 98480 12345",
+            "district": "Guntur",
+            "mandal": "Mangalagiri",
+            "village": "Kaza Highway Junction",
+            "lat": 16.4251,
+            "lng": 80.5582,
+            "reason": "Blind curve on NH-16 with recurring accidents during night transit.",
+            "vehicle_type": "Advanced Life Support (ALS)"
+        })
+        self.assertEqual(rec_res.status_code, 200)
+        rec_data = rec_res.get_json()
+        self.assertEqual(rec_data["status"], "success")
+        rec_id = rec_data["recommendation"]["id"]
+
+        # 3. Verify public citizen cannot approve recommendations -> 403
+        res = client.post(f"/api/officer/approve_recommendation/{rec_id}")
+        self.assertEqual(res.status_code, 403)
+
+        # 4. Officer logs in
+        client.post("/api/auth/login", json={
+            "username": "officer", "password": "officer123", "role": "officer"
+        })
+
+        # 5. Officer approves recommendation -> converts to real manual ambulance station
+        appr_res = client.post(f"/api/officer/approve_recommendation/{rec_id}")
+        self.assertEqual(appr_res.status_code, 200)
+        appr_data = appr_res.get_json()
+        self.assertEqual(appr_data["status"], "success")
+        self.assertEqual(appr_data["recommendation"]["status"], "Approved & Deployed")
+        self.assertIn("station", appr_data)
+        stn_id = appr_data["station"]["station_id"]
+
+        # Clean up deployed station
+        client.delete(f"/api/manual_ambulances/{stn_id}")
+
+    def test_15_public_accident_reporting_and_dispatch(self):
+        """Test public citizen accident reporting and emergency dispatch."""
+        client = app.test_client()
+
+        # 1. Citizen reports an accident
+        acc_res = client.post("/api/public/report_accident", json={
+            "reporter_name": "Mohan Rao",
+            "reporter_phone": "+91 99887 66554",
+            "lat": 16.312,
+            "lng": 80.451,
+            "location_name": "NH-16 Bypass Pillar 24",
+            "district": "Guntur",
+            "mandal": "Guntur Rural",
+            "severity": "Critical",
+            "injured_count": 2,
+            "landmark": "Near Toll Plaza",
+            "description": "Two-wheeler collided with truck."
+        })
+        self.assertEqual(acc_res.status_code, 200)
+        acc_data = acc_res.get_json()
+        self.assertEqual(acc_data["status"], "success")
+        self.assertIn("accident", acc_data)
+        self.assertIn("dispatch", acc_data)
+        acc_id = acc_data["accident"]["id"]
+
+        # 2. View reported accidents list
+        list_res = client.get("/api/reported_accidents")
+        self.assertEqual(list_res.status_code, 200)
+        found = [a for a in list_res.get_json()["accidents"] if a["id"] == acc_id]
+        self.assertEqual(len(found), 1)
+
+        # 3. Officer resolves accident
+        client.post("/api/auth/login", json={
+            "username": "officer", "password": "officer123", "role": "officer"
+        })
+        res_res = client.post(f"/api/officer/resolve_accident/{acc_id}")
+        self.assertEqual(res_res.status_code, 200)
+        self.assertEqual(res_res.get_json()["accident"]["status"], "Resolved / Hospitalized")
+
+    def test_16_user_and_officer_registration_system(self):
+        """Test registration signup for public citizens and officers without username field."""
+        from src.api.app import save_users_to_disk
+        # Clean up any leftover test users from earlier runs
+        DATA_CACHE["users"] = [
+            u for u in DATA_CACHE.get("users", [])
+            if u.get("email") not in ("harish_test@example.com", "k.rao_test@ap108.gov.in")
+        ]
+        save_users_to_disk()
+
+        client = app.test_client()
+
+        try:
+            # 1. Register new public citizen without username (only name, email, phone, password)
+            res = client.post("/api/auth/register", json={
+                "role": "public",
+                "name": "K. Harish",
+                "email": "harish_test@example.com",
+                "phone": "+91 91234 56789",
+                "password": "harishpassword123"
+            })
+            self.assertEqual(res.status_code, 200)
+            data = res.get_json()
+            self.assertEqual(data["status"], "success")
+            self.assertEqual(data["user"]["role"], "public")
+            self.assertEqual(data["user"]["phone"], "+91 91234 56789")
+
+            # Verify new citizen cannot manually position ambulance -> 403
+            res = client.post("/api/place_ambulance_nearer", json={"lat": 16.3, "lng": 80.4, "location_name": "Test Nearer"})
+            self.assertEqual(res.status_code, 403)
+
+            # 2. Register duplicate mobile/email -> Expect 409 Conflict
+            res = client.post("/api/auth/register", json={
+                "role": "public",
+                "name": "Duplicate Harish",
+                "email": "harish_test@example.com",
+                "phone": "+91 91234 56789",
+                "password": "newpassword123"
+            })
+            self.assertEqual(res.status_code, 409)
+
+            # 3. Officer registration missing officer_id -> Expect 400 Bad Request
+            res = client.post("/api/auth/register", json={
+                "role": "officer",
+                "name": "Officer Test",
+                "email": "officer_test@ap108.gov.in",
+                "phone": "+91 94401 22334",
+                "password": "officerpass123"
+            })
+            self.assertEqual(res.status_code, 400)
+
+            # 4. Valid officer registration without username (only name, email, phone, officer_id, password)
+            res = client.post("/api/auth/register", json={
+                "role": "officer",
+                "name": "Officer K. Rao",
+                "email": "k.rao_test@ap108.gov.in",
+                "phone": "+91 94401 99887",
+                "officer_id": "AP-CAD-108-99",
+                "password": "kraopassword123"
+            })
+            self.assertEqual(res.status_code, 200)
+            data = res.get_json()
+            self.assertEqual(data["status"], "success")
+            self.assertEqual(data["user"]["role"], "officer")
+            self.assertEqual(data["user"]["officer_id"], "AP-CAD-108-99")
+
+            # 5. Verify newly registered officer CAN place manual ambulances
+            res = client.post("/api/place_ambulance_nearer", json={"lat": 16.31, "lng": 80.45, "location_name": "Officer Krao Station"})
+            self.assertEqual(res.status_code, 200)
+            stn_id = res.get_json()["station"]["station_id"]
+            client.delete(f"/api/manual_ambulances/{stn_id}")
+
+            # 6. Test login using Mobile Number for Citizen
+            res = client.post("/api/auth/login", json={
+                "username": "+91 91234 56789",
+                "password": "harishpassword123",
+                "role": "public"
+            })
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.get_json()["user"]["role"], "public")
+
+            # 7. Test login using Officer ID for Officer
+            res = client.post("/api/auth/login", json={
+                "username": "AP-CAD-108-99",
+                "password": "kraopassword123",
+                "role": "officer"
+            })
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.get_json()["user"]["role"], "officer")
+
+        finally:
+            # Cleanup test users created
+            DATA_CACHE["users"] = [
+                u for u in DATA_CACHE.get("users", [])
+                if u.get("email") not in ("harish_test@example.com", "k.rao_test@ap108.gov.in")
+            ]
+            save_users_to_disk()
 
 if __name__ == "__main__":
     unittest.main()

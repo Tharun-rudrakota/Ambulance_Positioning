@@ -24,7 +24,8 @@
         <i class="fa-solid fa-truck-medical pulse-icon"></i>
       </div>
       <div>
-        <h1>Ambulance Positioning System<span class="badge-ai">AI OPTIMIZER</span></h1>
+        <h1>Ambulance Positioning System
+          <span class="badge-ai">AI OPTIMIZER</span></h1>
         <p class="subtitle">Optimal Ambulance Positioning & Road Accident Recommendation System</p>
       </div>
     </div>
@@ -46,17 +47,30 @@
         <span class="label">Villages</span>
         <span class="val" id="stat-villages">{{ total_villages }}</span>
       </div>
-      <div class="stat-pill highlight">
-        <span class="label">Baseline Fleet</span>
-        <span class="val" id="stat-baseline">{{ baseline_ambulances_count }}</span>
-      </div>
       <div class="stat-pill highlight-green" id="pill-manual-amb" style="cursor: pointer;" title="Click to view & delete manually placed ambulances" onclick="scrollToManualPanel()">
         <span class="label">Manual 108s</span>
         <span class="val" id="stat-manual-amb" style="color: #34d399;">0</span>
       </div>
-      <a href="/api/export_report" class="btn-export" title="Export Station Deployment CSV">
-        <i class="fa-solid fa-file-arrow-down"></i> Export Report
-      </a>
+
+      <!-- Public Citizen Buttons -->
+      <button class="btn-header-action btn-accent-gold" id="btn-header-recommend" onclick="openRecommendModal()" title="Public Citizen: Recommend an ambulance station location">
+        <i class="fa-solid fa-lightbulb"></i> Recommend 108
+      </button>
+      <button class="btn-header-action btn-accent-red" id="btn-header-accident" onclick="openReportAccidentModal()" title="Public Citizen: Report active road accident">
+        <i class="fa-solid fa-triangle-exclamation"></i> Report Accident
+      </button>
+
+      <!-- Officer Console Review Button (Shown for Officers) -->
+      <button class="btn-header-action btn-accent-blue" id="btn-header-officer-console" style="display:none;" onclick="openOfficerConsoleModal()" title="Command Center Officer: Review citizen recommendations & accident calls">
+        <i class="fa-solid fa-shield-halved"></i> Officer Console <span id="officer-badge-count" style="background:#ef4444; color:#fff; font-size:0.68rem; padding:1px 6px; border-radius:10px; margin-left:4px; font-weight:700;">0</span>
+      </button>
+
+      <!-- User Profile / Login Pill -->
+      <div id="header-user-status" class="header-auth-toolbar">
+        <button class="btn-header-action btn-accent-green" id="btn-header-login" onclick="openAuthModal()">
+          <i class="fa-solid fa-right-to-bracket"></i> Sign In / Role
+        </button>
+      </div>
     </div>
   </header>
 
@@ -283,6 +297,18 @@
       <div class="map-floating-overlay">
         <div class="map-legend">
           <div class="legend-title"><i class="fa-solid fa-layer-group"></i> Map Layers & Legend</div>
+          <div class="legend-item" style="background: rgba(220, 38, 38, 0.15); border-radius: 4px; padding: 2px 4px; margin-bottom: 4px;">
+            <input type="checkbox" id="layer-reported-accidents" checked>
+            <label for="layer-reported-accidents">
+              <span class="legend-color-dot" style="background:#dc2626; border:1px solid #ef4444;"></span> <strong>🚨 Reported Accidents (<span id="legend-accident-count">0</span>)</strong>
+            </label>
+          </div>
+          <div class="legend-item" style="background: rgba(234, 179, 8, 0.15); border-radius: 4px; padding: 2px 4px; margin-bottom: 4px;">
+            <input type="checkbox" id="layer-public-recommendations" checked>
+            <label for="layer-public-recommendations">
+              <span class="legend-color-dot" style="background:#ca8a04; border:1px solid #eab308;"></span> <strong>💡 Citizen Recommendations (<span id="legend-rec-count">0</span>)</strong>
+            </label>
+          </div>
           <div class="legend-item" style="background: rgba(16, 185, 129, 0.1); border-radius: 4px; padding: 2px 4px; margin-bottom: 4px;">
             <input type="checkbox" id="layer-manual-ambulances" checked>
             <label for="layer-manual-ambulances">
@@ -359,6 +385,412 @@
       </div>
     </section>
   </main>
+
+  <!-- ==========================================================
+       MODALS: AUTHENTICATION, RECOMMENDATION, ACCIDENT & CONSOLE
+       ========================================================== -->
+
+  <!-- 1. Authentication & Registration Modal (Officer & Public Citizen) -->
+  <div id="modal-auth" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="auth-modal-title"><i class="fa-solid fa-id-card-clip" style="color:#38bdf8;"></i> Portal Login & Access</h3>
+        <button class="btn-close-modal" onclick="closeAuthModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <!-- Auth Mode Switcher: Sign In vs New Registration -->
+        <div class="auth-mode-tabs">
+          <button class="auth-mode-btn active" id="btn-mode-signin" onclick="switchAuthMode('signin')">
+            <i class="fa-solid fa-right-to-bracket"></i> Sign In
+          </button>
+          <button class="auth-mode-btn" id="btn-mode-signup" onclick="switchAuthMode('signup')">
+            <i class="fa-solid fa-user-plus"></i> New Registration
+          </button>
+        </div>
+
+        <!-- Role Tabs: Command Officer vs Public Citizen -->
+        <div class="modal-tabs" style="margin-top: 10px; margin-bottom: 12px;">
+          <button class="modal-tab-btn active-officer" id="tab-officer-btn" onclick="switchAuthRole('officer')">
+            <i class="fa-solid fa-shield-halved"></i> Command Officer / Authority
+          </button>
+          <button class="modal-tab-btn" id="tab-public-btn" onclick="switchAuthRole('public')">
+            <i class="fa-solid fa-users"></i> Public Citizen Portal
+          </button>
+        </div>
+
+        <!-- ========================================== -->
+        <!-- 1. SIGN IN SECTIONS (Username & Password)  -->
+        <!-- ========================================== -->
+        <div id="auth-signin-container">
+          <!-- Officer Sign In Form -->
+          <div id="signin-officer-section">
+            <form id="form-login-officer" onsubmit="handleOfficerLogin(event)">
+              <div class="form-group" style="margin-bottom: 12px;">
+                <label for="officer-username"><i class="fa-solid fa-id-badge"></i> Officer ID / Username / Mail ID</label>
+                <input type="text" id="officer-username" class="form-control" placeholder="Enter Officer ID, mail or username..." required autocomplete="username">
+              </div>
+              <div class="form-group" style="margin-bottom: 12px;">
+                <label for="officer-password"><i class="fa-solid fa-lock"></i> Officer Password</label>
+                <input type="password" id="officer-password" class="form-control" placeholder="Enter password..." required autocomplete="current-password">
+              </div>
+              <div style="font-size: 0.75rem; color: #94a3b8; margin-bottom: 14px;">
+                <i class="fa-solid fa-shield-halved" style="color:#38bdf8;"></i> Authorized officers have exclusive privileges to manually position/delete 108 fleet units and approve citizen recommendations.
+              </div>
+              <button type="submit" class="btn btn-primary btn-block" style="background:#2563eb; border-color:#3b82f6;">
+                <i class="fa-solid fa-shield-halved"></i> Sign In as Command Officer
+              </button>
+            </form>
+            <div class="auth-toggle-footer">
+              Don't have an officer account? <a href="javascript:void(0)" onclick="switchAuthMode('signup'); switchAuthRole('officer');">Register / Sign Up</a>
+            </div>
+          </div>
+
+          <!-- Public Citizen Sign In Form -->
+          <div id="signin-public-section" style="display:none;">
+            <form id="form-login-public" onsubmit="handlePublicLogin(event)">
+              <div class="form-group" style="margin-bottom: 12px;">
+                <label for="public-username"><i class="fa-solid fa-mobile-screen"></i> Mobile Number / Mail ID</label>
+                <input type="text" id="public-username" class="form-control" placeholder="Enter mobile number or mail ID..." required autocomplete="username">
+              </div>
+              <div class="form-group" style="margin-bottom: 12px;">
+                <label for="public-password"><i class="fa-solid fa-key"></i> Password</label>
+                <input type="password" id="public-password" class="form-control" placeholder="Enter password..." required autocomplete="current-password">
+              </div>
+              <div style="font-size: 0.75rem; color: #94a3b8; margin-bottom: 14px;">
+                <i class="fa-solid fa-circle-info" style="color:#facc15;"></i> Citizens can recommend ambulance positioning for high-risk zones and report road accidents in real time.
+              </div>
+              <button type="submit" class="btn btn-primary btn-block" style="background:#ca8a04; border-color:#eab308; color:#fff;">
+                <i class="fa-solid fa-right-to-bracket"></i> Sign In to Public Portal
+              </button>
+            </form>
+            <div class="auth-toggle-footer">
+              New to AP 108 Emergency Portal? <a href="javascript:void(0)" onclick="switchAuthMode('signup'); switchAuthRole('public');">Create Citizen Account</a>
+            </div>
+          </div>
+        </div>
+
+        <!-- ======================================================== -->
+        <!-- 2. REGISTRATION SECTIONS (Sign Up with Detailed Profile) -->
+        <!-- ======================================================== -->
+        <div id="auth-signup-container" style="display:none;">
+          <!-- Officer Registration Form -->
+          <div id="signup-officer-section">
+            <form id="form-register-officer" onsubmit="handleOfficerRegister(event)">
+              <div class="form-group" style="margin-bottom: 10px;">
+                <label for="reg-officer-name"><i class="fa-solid fa-user-shield"></i> Officer Full Name</label>
+                <input type="text" id="reg-officer-name" class="form-control" placeholder="e.g. Capt. Rajesh Varma" required>
+              </div>
+              <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                <div class="form-group">
+                  <label for="reg-officer-email"><i class="fa-solid fa-envelope"></i> Mail ID</label>
+                  <input type="email" id="reg-officer-email" class="form-control" placeholder="officer@ap108.gov.in" required>
+                </div>
+                <div class="form-group">
+                  <label for="reg-officer-phone"><i class="fa-solid fa-phone"></i> Mobile Number</label>
+                  <input type="tel" id="reg-officer-phone" class="form-control" placeholder="+91 94401..." required>
+                </div>
+              </div>
+              <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px;">
+                <div class="form-group">
+                  <label for="reg-officer-id"><i class="fa-solid fa-id-badge"></i> Officer ID / Badge Number</label>
+                  <input type="text" id="reg-officer-id" class="form-control" placeholder="e.g. AP-CAD-108-09" required>
+                </div>
+                <div class="form-group">
+                  <label for="reg-officer-password"><i class="fa-solid fa-lock"></i> Create Password</label>
+                  <input type="password" id="reg-officer-password" class="form-control" placeholder="Create password" required autocomplete="new-password">
+                </div>
+              </div>
+              <button type="submit" class="btn btn-primary btn-block" style="background:#2563eb; border-color:#3b82f6;">
+                <i class="fa-solid fa-user-plus"></i> Register as Command Officer
+              </button>
+            </form>
+            <div class="auth-toggle-footer">
+              Already registered? <a href="javascript:void(0)" onclick="switchAuthMode('signin'); switchAuthRole('officer');">Sign In here</a>
+            </div>
+          </div>
+
+          <!-- Public Citizen Registration Form -->
+          <div id="signup-public-section" style="display:none;">
+            <form id="form-register-public" onsubmit="handlePublicRegister(event)">
+              <div class="form-group" style="margin-bottom: 10px;">
+                <label for="reg-public-name"><i class="fa-solid fa-user"></i> Full Name</label>
+                <input type="text" id="reg-public-name" class="form-control" placeholder="e.g. P. Ravi Teja" required>
+              </div>
+              <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+                <div class="form-group">
+                  <label for="reg-public-email"><i class="fa-solid fa-envelope"></i> Mail ID</label>
+                  <input type="email" id="reg-public-email" class="form-control" placeholder="ravi.teja@gmail.com" required>
+                </div>
+                <div class="form-group">
+                  <label for="reg-public-phone"><i class="fa-solid fa-phone"></i> Mobile Number</label>
+                  <input type="tel" id="reg-public-phone" class="form-control" placeholder="+91 98480..." required>
+                </div>
+              </div>
+              <div class="form-group" style="margin-bottom: 14px;">
+                <label for="reg-public-password"><i class="fa-solid fa-key"></i> Create Password</label>
+                <input type="password" id="reg-public-password" class="form-control" placeholder="Create password" required autocomplete="new-password">
+              </div>
+              <button type="submit" class="btn btn-primary btn-block" style="background:#ca8a04; border-color:#eab308; color:#fff;">
+                <i class="fa-solid fa-user-plus"></i> Register Citizen Account
+              </button>
+            </form>
+            <div class="auth-toggle-footer">
+              Already have an account? <a href="javascript:void(0)" onclick="switchAuthMode('signin'); switchAuthRole('public');">Sign In here</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. Recommend Ambulance Positioning Modal (Public Citizen) -->
+  <div id="modal-recommend-ambulance" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3><i class="fa-solid fa-lightbulb" style="color:#facc15;"></i> Recommend 108 Ambulance Positioning</h3>
+        <button class="btn-close-modal" onclick="closeRecommendModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size:0.8rem; color:#94a3b8; margin-top:0;">
+          Public citizens and community leaders can suggest positioning a dedicated 108 ambulance near high-risk blackspots, rural clusters, or remote mandals for Command Center officer approval.
+        </p>
+
+        <form id="form-recommend-ambulance" onsubmit="handleRecommendationSubmit(event)">
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+            <div class="form-group">
+              <label for="rec-district"><i class="fa-solid fa-map"></i> Target District</label>
+              <select id="rec-district" class="form-control" onchange="populateMandalsForRec()">
+                {% for d in districts %}
+                <option value="{{ d }}">{{ d }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="rec-mandal"><i class="fa-solid fa-building-columns"></i> Target Mandal</label>
+              <select id="rec-mandal" class="form-control">
+                <option value="General">All Mandals</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group" style="margin-bottom: 10px;">
+            <label for="rec-village"><i class="fa-solid fa-location-dot"></i> Village / Highway Junction Name</label>
+            <input type="text" id="rec-village" class="form-control" placeholder="e.g. Kaza Toll Plaza, Peddapadu Bypass..." required>
+          </div>
+
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+            <div class="form-group">
+              <label for="rec-lat">Latitude</label>
+              <input type="number" step="0.00001" id="rec-lat" class="form-control" value="16.3120">
+            </div>
+            <div class="form-group">
+              <label for="rec-lng">Longitude</label>
+              <input type="number" step="0.00001" id="rec-lng" class="form-control" value="80.4510">
+            </div>
+          </div>
+          <div style="text-align: right; margin-top:-6px; margin-bottom: 10px;">
+            <button type="button" class="btn-text-action" style="font-size:0.75rem; color:#38bdf8;" onclick="useMapCenterForRec()">
+              <i class="fa-solid fa-crosshairs"></i> Use Current Map Center
+            </button>
+          </div>
+
+          <div class="form-group" style="margin-bottom: 10px;">
+            <label for="rec-vehicle-type"><i class="fa-solid fa-truck-medical"></i> Recommended Vehicle Tier</label>
+            <select id="rec-vehicle-type" class="form-control">
+              <option value="Advanced Life Support (ALS)">Advanced Life Support (ALS) - ICU & Ventilator Equipped</option>
+              <option value="Basic Life Support (BLS)">Basic Life Support (BLS) - Oxygen & First Aid</option>
+            </select>
+          </div>
+
+          <div class="form-group" style="margin-bottom: 12px;">
+            <label for="rec-reason"><i class="fa-solid fa-circle-exclamation"></i> Reason / Hazard Details</label>
+            <textarea id="rec-reason" class="form-control" rows="3" placeholder="Explain why an ambulance is urgently needed here (e.g. high-speed accident history, distance to apex hospital)..." required></textarea>
+          </div>
+
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px;">
+            <div class="form-group">
+              <label for="rec-name"><i class="fa-solid fa-user"></i> Your Name</label>
+              <input type="text" id="rec-name" class="form-control" placeholder="Full Name" required>
+            </div>
+            <div class="form-group">
+              <label for="rec-phone"><i class="fa-solid fa-phone"></i> Contact Mobile</label>
+              <input type="text" id="rec-phone" class="form-control" placeholder="+91..." required>
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-primary btn-block" style="background:#ca8a04; border-color:#eab308; color:#fff;">
+            <i class="fa-solid fa-paper-plane"></i> Submit Recommendation for Officer Review
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. Report Road Accident Modal (Public Citizen & Emergency Callers) -->
+  <div id="modal-report-accident" class="modal-overlay">
+    <div class="modal-card">
+      <div class="modal-header" style="background: rgba(220, 38, 38, 0.15); border-bottom-color: #ef4444;">
+        <h3><i class="fa-solid fa-car-burst" style="color:#ef4444;"></i> 🚨 Emergency: Report Road Accident</h3>
+        <button class="btn-close-modal" onclick="closeReportAccidentModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size:0.8rem; color:#fca5a5; margin-top:0;">
+          Immediate 108 Emergency Dispatch: Logging this report alerts Command Center officers and computes real-time nearest ambulance response.
+        </p>
+
+        <form id="form-report-accident" onsubmit="handleAccidentReportSubmit(event)">
+          <div class="form-group" style="margin-bottom: 10px;">
+            <label for="acc-location"><i class="fa-solid fa-location-crosshairs"></i> Crash Location / Highway Mile</label>
+            <input type="text" id="acc-location" class="form-control" placeholder="e.g. NH-16 Guntur Bypass near Nallapadu Flyover..." required>
+          </div>
+
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
+            <div class="form-group">
+              <label for="acc-lat">Latitude</label>
+              <input type="number" step="0.00001" id="acc-lat" class="form-control" value="16.3120">
+            </div>
+            <div class="form-group">
+              <label for="acc-lng">Longitude</label>
+              <input type="number" step="0.00001" id="acc-lng" class="form-control" value="80.4510">
+            </div>
+          </div>
+          <div style="text-align: right; margin-top:-6px; margin-bottom: 10px;">
+            <button type="button" class="btn-text-action" style="font-size:0.75rem; color:#ef4444;" onclick="useMapCenterForAccident()">
+              <i class="fa-solid fa-location-pin"></i> Use Clicked / Map Spot
+            </button>
+          </div>
+
+          <!-- Severity Selection -->
+          <label style="font-size: 0.8rem; font-weight: 600; color:#fff; display:block; margin-bottom:4px;">
+            <i class="fa-solid fa-triangle-exclamation"></i> Collision Severity:
+          </label>
+          <div class="severity-picker">
+            <div class="severity-option selected critical" id="sev-critical" onclick="selectSeverity('Critical')">
+              🔴 Critical
+              <div style="font-size:0.68rem; color:#94a3b8; font-weight:normal;">Unconscious / Trapped</div>
+            </div>
+            <div class="severity-option" id="sev-serious" onclick="selectSeverity('Serious')">
+              🟠 Serious
+              <div style="font-size:0.68rem; color:#94a3b8; font-weight:normal;">Major Injuries</div>
+            </div>
+            <div class="severity-option" id="sev-moderate" onclick="selectSeverity('Moderate')">
+              🟡 Moderate
+              <div style="font-size:0.68rem; color:#94a3b8; font-weight:normal;">Minor Collisions</div>
+            </div>
+          </div>
+          <input type="hidden" id="acc-severity" value="Critical">
+
+          <div style="display:grid; grid-template-columns: 1fr 2fr; gap: 10px; margin-bottom: 10px;">
+            <div class="form-group">
+              <label for="acc-injured"><i class="fa-solid fa-hospital-user"></i> Injured Persons</label>
+              <input type="number" min="1" max="50" id="acc-injured" class="form-control" value="2" required>
+            </div>
+            <div class="form-group">
+              <label for="acc-landmark"><i class="fa-solid fa-landmark"></i> Key Landmark</label>
+              <input type="text" id="acc-landmark" class="form-control" placeholder="Nearby petrol pump, toll gate, bridge...">
+            </div>
+          </div>
+
+          <div class="form-group" style="margin-bottom: 12px;">
+            <label for="acc-description"><i class="fa-solid fa-notes-medical"></i> Incident Description</label>
+            <textarea id="acc-description" class="form-control" rows="2" placeholder="Vehicle types involved, road blockage status, immediate medical assistance needed..."></textarea>
+          </div>
+
+          <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px;">
+            <div class="form-group">
+              <label for="acc-caller-name"><i class="fa-solid fa-user"></i> Caller Name</label>
+              <input type="text" id="acc-caller-name" class="form-control" placeholder="Your Name" required>
+            </div>
+            <div class="form-group">
+              <label for="acc-caller-phone"><i class="fa-solid fa-phone"></i> Mobile Number</label>
+              <input type="text" id="acc-caller-phone" class="form-control" placeholder="+91 94401..." required>
+            </div>
+          </div>
+
+          <button type="submit" class="btn btn-primary btn-block" style="background:#dc2626; border-color:#ef4444; font-size:0.95rem; font-weight:700;">
+            <i class="fa-solid fa-truck-medical"></i> 🚨 Log Road Accident & Trigger 108 Dispatch
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. Officer Command Console Modal (Higher Authority Review) -->
+  <div id="modal-officer-console" class="modal-overlay">
+    <div class="modal-card modal-lg">
+      <div class="modal-header" style="background: rgba(37, 99, 235, 0.15); border-bottom-color: #3b82f6;">
+        <h3><i class="fa-solid fa-shield-halved" style="color:#60a5fa;"></i> Command Center Officer Console</h3>
+        <button class="btn-close-modal" onclick="closeOfficerConsoleModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-tabs">
+          <button class="modal-tab-btn active-officer" id="tab-console-recs-btn" onclick="switchConsoleTab('recs')">
+            <i class="fa-solid fa-lightbulb"></i> Citizen Positioning Recommendations (<span id="console-rec-count">0</span>)
+          </button>
+          <button class="modal-tab-btn" id="tab-console-accs-btn" onclick="switchConsoleTab('accs')">
+            <i class="fa-solid fa-triangle-exclamation"></i> Citizen Reported Accidents (<span id="console-acc-count">0</span>)
+          </button>
+        </div>
+
+        <!-- Tab A: Citizen Recommendations List -->
+        <div id="console-recs-view">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+            <span style="font-size:0.8rem; color:#94a3b8;">Review citizen requests and deploy authorized 108 stations:</span>
+            <button class="btn-text-action" onclick="loadOfficerConsoleData()" style="font-size:0.75rem; color:#38bdf8;">
+              <i class="fa-solid fa-rotate"></i> Refresh
+            </button>
+          </div>
+          <div id="console-recs-list" class="console-card-list">
+            <!-- Dynamically populated -->
+          </div>
+        </div>
+
+        <!-- Tab B: Citizen Reported Accidents List -->
+        <div id="console-accs-view" style="display:none;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+            <span style="font-size:0.8rem; color:#94a3b8;">Active emergency road accident calls logged by citizens:</span>
+            <button class="btn-text-action" onclick="loadOfficerConsoleData()" style="font-size:0.75rem; color:#ef4444;">
+              <i class="fa-solid fa-rotate"></i> Refresh
+            </button>
+          </div>
+          <div id="console-accs-list" class="console-card-list">
+            <!-- Dynamically populated -->
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 5. Role Restriction Notice Modal -->
+  <div id="modal-restricted-notice" class="modal-overlay">
+    <div class="modal-card" style="max-width: 480px; text-align: center;">
+      <div class="modal-header" style="justify-content: center; border-bottom: none; padding-bottom: 0;">
+        <div style="width: 52px; height: 52px; border-radius: 50%; background: rgba(239, 68, 68, 0.15); border: 2px solid #ef4444; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; color: #ef4444; margin: 0 auto;">
+          <i class="fa-solid fa-lock"></i>
+        </div>
+      </div>
+      <div class="modal-body" style="padding-top: 12px;">
+        <h4 style="margin: 0 0 8px 0; font-size: 1.15rem; color: #fff;">Command Officer Authority Required</h4>
+        <p style="font-size: 0.84rem; color: #cbd5e1; line-height: 1.5; margin-bottom: 18px;">
+          Direct manual placement and repositioning of live 108 emergency fleet ambulances is restricted to <strong>Command Center Officers</strong> and <strong>Higher Health Authorities</strong>.
+        </p>
+        <p style="font-size: 0.8rem; color: #94a3b8; line-height: 1.4; margin-bottom: 20px;">
+          As a public citizen or community member, you can submit an <strong>Ambulance Positioning Recommendation</strong> for officer review, or <strong>Report an Accident</strong> for immediate emergency response.
+        </p>
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <button class="btn btn-primary" style="background: #ca8a04; border-color: #eab308; color: #fff;" onclick="closeRestrictedNotice(); openRecommendModal();">
+            <i class="fa-solid fa-lightbulb"></i> Submit Ambulance Recommendation
+          </button>
+          <button class="btn btn-secondary" style="background: #2563eb; border-color: #3b82f6; color: #fff;" onclick="closeRestrictedNotice(); openAuthModal('officer');">
+            <i class="fa-solid fa-shield-halved"></i> Sign In as Command Officer
+          </button>
+          <button class="btn-text-action" style="color: #94a3b8; font-size: 0.8rem; margin-top: 4px;" onclick="closeRestrictedNotice();">
+            Dismiss
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Leaflet JS -->
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>

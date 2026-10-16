@@ -1,1 +1,1 @@
-web: python optimize.py --serve
+web: gunicorn wsgi:app

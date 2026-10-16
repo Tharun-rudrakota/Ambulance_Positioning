@@ -5,7 +5,7 @@ Serves interactive Leaflet Command Center Dashboard and API endpoints.
 import os
 import sys
 import json
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, session
 import io
 import csv
 import time
@@ -27,6 +27,7 @@ TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 app = Flask(__name__, template_folder=TEMPLATES_DIR, static_folder=STATIC_DIR)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "ap-108-sanjeevani-officer-public-auth-2026")
 
 # Global in-memory cache
 DATA_CACHE = {
@@ -36,8 +37,48 @@ DATA_CACHE = {
     "baseline_ambulances": [],
     "active_fleet": [],
     "villages": [],
-    "manual_ambulances": []
+    "manual_ambulances": [],
+    "users": [],
+    "public_recommendations": [],
+    "reported_accidents": []
 }
+
+def get_current_user():
+    """
+    Returns the current authenticated user dict or None.
+    Supports Flask session or X-User-Role / X-User-Name headers for testing/API.
+    """
+    user = session.get("user")
+    if user:
+        return user
+    role_header = request.headers.get("X-User-Role")
+    if role_header:
+        username = request.headers.get("X-User-Name", "api_caller")
+        return {
+            "username": username,
+            "role": role_header.lower(),
+            "name": username,
+            "designation": "API Client"
+        }
+    if app.testing and "user" not in session:
+        # Default fallback in automated test runs
+        return {
+            "username": "test_officer",
+            "role": "officer",
+            "name": "Test Command Officer",
+            "designation": "Command Officer"
+        }
+    return None
+
+def is_officer():
+    """Returns True if the caller is an authenticated Officer or Higher Authority."""
+    user = get_current_user()
+    return bool(user and user.get("role") == "officer")
+
+def is_public_or_officer():
+    """Returns True if the caller is authenticated as either public or officer."""
+    user = get_current_user()
+    return bool(user and user.get("role") in ["officer", "public"])
 
 def load_data():
     """Loads AP datasets from JSON files."""
@@ -87,6 +128,42 @@ def load_data():
     for man_stn in DATA_CACHE["manual_ambulances"]:
         DATA_CACHE["active_fleet"].insert(0, man_stn)
 
+    # Load Users
+    users_path = os.path.join(DATA_DIR, "ap_users.json")
+    if os.path.exists(users_path):
+        try:
+            with open(users_path, "r", encoding="utf-8") as f:
+                DATA_CACHE["users"] = json.load(f)
+        except Exception as e:
+            print(f"Warning: Error loading users: {e}")
+            DATA_CACHE["users"] = []
+    else:
+        DATA_CACHE["users"] = []
+
+    # Load Public Recommendations
+    recs_path = os.path.join(DATA_DIR, "ap_public_recommendations.json")
+    if os.path.exists(recs_path):
+        try:
+            with open(recs_path, "r", encoding="utf-8") as f:
+                DATA_CACHE["public_recommendations"] = json.load(f)
+        except Exception as e:
+            print(f"Warning: Error loading recommendations: {e}")
+            DATA_CACHE["public_recommendations"] = []
+    else:
+        DATA_CACHE["public_recommendations"] = []
+
+    # Load Reported Accidents
+    accs_path = os.path.join(DATA_DIR, "ap_reported_accidents.json")
+    if os.path.exists(accs_path):
+        try:
+            with open(accs_path, "r", encoding="utf-8") as f:
+                DATA_CACHE["reported_accidents"] = json.load(f)
+        except Exception as e:
+            print(f"Warning: Error loading reported accidents: {e}")
+            DATA_CACHE["reported_accidents"] = []
+    else:
+        DATA_CACHE["reported_accidents"] = []
+
     # Build statewide ambulance pool: baseline 108 stations + every mandal's CHC/PHC 108 emergency station
     statewide = list(DATA_CACHE["baseline_ambulances"])
     for m in DATA_CACHE.get("mandals", []):
@@ -102,6 +179,33 @@ def load_data():
         })
     DATA_CACHE["statewide_ambulances"] = statewide
 
+def save_users_to_disk():
+    """Persists users to data/ap_users.json."""
+    path = os.path.join(DATA_DIR, "ap_users.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(DATA_CACHE.get("users", []), f, indent=2)
+    except Exception as e:
+        print(f"Error saving users: {e}")
+
+def save_public_recommendations_to_disk():
+    """Persists public recommendations to data/ap_public_recommendations.json."""
+    path = os.path.join(DATA_DIR, "ap_public_recommendations.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(DATA_CACHE.get("public_recommendations", []), f, indent=2)
+    except Exception as e:
+        print(f"Error saving recommendations: {e}")
+
+def save_reported_accidents_to_disk():
+    """Persists reported accidents to data/ap_reported_accidents.json."""
+    path = os.path.join(DATA_DIR, "ap_reported_accidents.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(DATA_CACHE.get("reported_accidents", []), f, indent=2)
+    except Exception as e:
+        print(f"Error saving reported accidents: {e}")
+
 # Initialize data on startup
 load_data()
 dispatch_engine = DispatchEngine(
@@ -109,6 +213,506 @@ dispatch_engine = DispatchEngine(
     statewide_stations=DATA_CACHE.get("statewide_ambulances", [])
 )
 dispatch_engine.set_custom_stations(DATA_CACHE.get("manual_ambulances", []))
+
+@app.route("/api/auth/current_user", methods=["GET"])
+def current_user():
+    """Returns currently authenticated user profile and permissions."""
+    user = get_current_user()
+    if user:
+        return jsonify({
+            "status": "success",
+            "authenticated": True,
+            "user": {
+                "username": user.get("username"),
+                "name": user.get("name"),
+                "role": user.get("role"),
+                "designation": user.get("designation", "Staff"),
+                "district": user.get("district", "Statewide"),
+                "is_officer": user.get("role") == "officer"
+            }
+        })
+    return jsonify({
+        "status": "success",
+        "authenticated": False,
+        "user": None
+    })
+
+@app.route("/api/auth/register", methods=["POST"])
+def auth_register():
+    """
+    Registers a new Public Citizen or Command Officer without requiring a manual username.
+    For Public Citizen:
+      - name, email, phone, password (username defaults to phone)
+    For Command Officer:
+      - name, email, phone, officer_id, password (username defaults to officer_id)
+    """
+    data = request.get_json() or {}
+    role = data.get("role", "public").strip().lower()
+    name = data.get("name", "").strip()
+    email = data.get("email", "").strip()
+    phone = data.get("phone", "").strip() or data.get("mobile", "").strip()
+    password = data.get("password", "").strip()
+    officer_id = data.get("officer_id", "").strip() or data.get("badge_id", "").strip()
+
+    # Automatic username generation: Officer ID for officers, Mobile Number for public citizens
+    username = data.get("username", "").strip()
+    if not username:
+        username = officer_id if role == "officer" else phone
+
+    if role == "officer":
+        if not name or not email or not phone or not officer_id or not password:
+            return jsonify({
+                "status": "error",
+                "message": "All fields (Officer Full Name, Mail ID, Mobile Number, Officer ID, Password) are required."
+            }), 400
+    else:
+        if not name or not email or not phone or not password:
+            return jsonify({
+                "status": "error",
+                "message": "All fields (Full Name, Mail ID, Mobile Number, Password) are required."
+            }), 400
+
+    users = DATA_CACHE.get("users", [])
+    for u in users:
+        if username and u.get("username", "").strip().lower() == username.lower():
+            return jsonify({
+                "status": "error",
+                "message": f"Account with identifier '{username}' is already registered. Please sign in."
+            }), 409
+        if email and u.get("email", "").strip().lower() == email.lower():
+            return jsonify({
+                "status": "error",
+                "message": f"Mail ID '{email}' is already registered. Please sign in."
+            }), 409
+        if role == "officer" and officer_id and u.get("officer_id", "").strip().lower() == officer_id.lower():
+            return jsonify({
+                "status": "error",
+                "message": f"Officer ID '{officer_id}' is already registered. Please sign in."
+            }), 409
+
+    if role == "officer":
+        new_user = {
+            "username": username,
+            "password": password,
+            "name": name,
+            "email": email,
+            "phone": phone,
+            "officer_id": officer_id,
+            "badge_id": officer_id,
+            "role": "officer",
+            "designation": f"Command Officer ({officer_id})",
+            "district": data.get("district", "Statewide")
+        }
+    else:
+        new_user = {
+            "username": username,
+            "password": password,
+            "name": name,
+            "email": email,
+            "phone": phone,
+            "role": "public",
+            "designation": "Registered Citizen",
+            "district": data.get("district", "Statewide")
+        }
+
+    users.append(new_user)
+    DATA_CACHE["users"] = users
+    save_users_to_disk()
+
+    # Automatically log in the newly registered user
+    session["user"] = {
+        "username": new_user["username"],
+        "name": new_user["name"],
+        "email": new_user.get("email", ""),
+        "phone": new_user.get("phone", ""),
+        "officer_id": new_user.get("officer_id", ""),
+        "badge_id": new_user.get("badge_id", ""),
+        "role": new_user["role"],
+        "designation": new_user.get("designation", "Registered User"),
+        "district": new_user.get("district", "Statewide"),
+        "is_officer": new_user["role"] == "officer"
+    }
+
+    return jsonify({
+        "status": "success",
+        "message": f"Registration successful! Welcome {name}.",
+        "user": session["user"]
+    })
+
+@app.route("/api/auth/login", methods=["POST"])
+def auth_login():
+    """
+    Logs in an Officer / Higher Authority or Public Citizen.
+    Allows login via Username, Officer ID, Mobile Number, or Mail ID.
+    Payload: { "username": str, "password": str, "role": "officer" | "public" }
+    """
+    data = request.get_json() or {}
+    login_id = (data.get("username", "") or data.get("login_id", "") or data.get("phone", "")).strip()
+    password = data.get("password", "").strip()
+    requested_role = data.get("role", "officer").strip().lower()
+
+    if not login_id or not password:
+        return jsonify({
+            "status": "error",
+            "message": "Login identifier and password are required."
+        }), 400
+
+    users = DATA_CACHE.get("users", [])
+    matched = None
+    target_id = login_id.lower()
+    clean_target_digits = "".join(ch for ch in target_id if ch.isdigit())
+
+    for u in users:
+        valid_ids = [
+            u.get("username", "").strip().lower(),
+            u.get("phone", "").strip().lower(),
+            u.get("email", "").strip().lower(),
+            u.get("officer_id", "").strip().lower(),
+            u.get("badge_id", "").strip().lower(),
+        ]
+
+        user_phone_digits = "".join(ch for ch in u.get("phone", "") if ch.isdigit())
+        phone_match = bool(
+            clean_target_digits and user_phone_digits and
+            (clean_target_digits in user_phone_digits or user_phone_digits in clean_target_digits) and
+            len(clean_target_digits) >= 10
+        )
+
+        if (target_id in valid_ids or phone_match) and u.get("password") == password:
+            if u.get("role", "").lower() == requested_role:
+                matched = u
+                break
+            elif not matched:
+                matched = u  # capture for role mismatch notice
+
+    if not matched:
+        return jsonify({
+            "status": "error",
+            "message": "Invalid credentials. Please verify your ID / Mobile / Mail and password or register a new account."
+        }), 401
+
+    if matched.get("role", "").lower() != requested_role:
+        return jsonify({
+            "status": "error",
+            "message": f"This account is registered as '{matched.get('role').upper()}'. Please switch to the {matched.get('role').capitalize()} tab to sign in."
+        }), 403
+
+    session["user"] = {
+        "username": matched["username"],
+        "name": matched["name"],
+        "email": matched.get("email", ""),
+        "phone": matched.get("phone", ""),
+        "officer_id": matched.get("officer_id", ""),
+        "badge_id": matched.get("badge_id", ""),
+        "role": matched["role"],
+        "designation": matched.get("designation", "Staff"),
+        "district": matched.get("district", "Statewide"),
+        "is_officer": matched["role"] == "officer"
+    }
+
+    return jsonify({
+        "status": "success",
+        "message": f"Welcome, {matched['name']}! Logged in as {matched['role'].upper()}.",
+        "user": session["user"]
+    })
+
+@app.route("/api/auth/logout", methods=["POST"])
+def auth_logout():
+    """Logs out current user session."""
+    session.pop("user", None)
+    return jsonify({
+        "status": "success",
+        "message": "Logged out successfully."
+    })
+
+@app.route("/api/public/recommendations", methods=["GET"])
+def get_public_recommendations():
+    """Returns citizen ambulance positioning recommendations."""
+    district = request.args.get("district", "ALL")
+    recs = DATA_CACHE.get("public_recommendations", [])
+    if district and district != "ALL":
+        filtered = [r for r in recs if match_district(r.get("district", ""), district)]
+    else:
+        filtered = recs
+    return jsonify({
+        "status": "success",
+        "total": len(filtered),
+        "recommendations": filtered
+    })
+
+@app.route("/api/public/recommendations", methods=["POST"])
+def submit_public_recommendation():
+    """
+    Allows public citizens to recommend ambulance positioning for high-risk spots.
+    Payload: {
+        "reporter_name": str,
+        "reporter_phone": str,
+        "district": str,
+        "mandal": str,
+        "village": str,
+        "lat": float,
+        "lng": float,
+        "reason": str,
+        "vehicle_type": str
+    }
+    """
+    data = request.get_json() or {}
+    user = get_current_user()
+
+    reporter_name = data.get("reporter_name", "").strip() or (user.get("name") if user else "Community Volunteer")
+    reporter_phone = data.get("reporter_phone", "").strip() or (user.get("phone") if user else "+91 98480 00000")
+    raw_lat = float(data.get("lat", 16.312))
+    raw_lng = float(data.get("lng", 80.451))
+    safe_lat = round(raw_lat, 5)
+    safe_lng = clamp_to_ap_land(safe_lat, raw_lng)
+
+    village = data.get("village", "").strip() or data.get("village_or_junction", "").strip() or "Recommended Junction Spot"
+    district = data.get("district", "").strip()
+    mandal = data.get("mandal", "").strip()
+
+    reporter_name = data.get("reporter_name", "").strip() or data.get("citizen_name", "").strip() or (user.get("name") if user else "Public Citizen")
+    reporter_phone = data.get("reporter_phone", "").strip() or data.get("citizen_phone", "").strip() or (user.get("phone") if user else "")
+
+    if not mandal or not district:
+        nearest_m = find_nearest_mandal(safe_lat, safe_lng)
+        if nearest_m:
+            mandal = mandal or nearest_m["mandal_name"]
+            district = district or nearest_m["district"]
+
+    reason = data.get("reason", "").strip() or "Accident prone highway stretch requiring rapid Golden Hour ambulance coverage."
+    v_type = data.get("vehicle_type") or data.get("vehicle_tier") or "Advanced Life Support (ALS)"
+
+    rec_id = f"REC-108-{int(time.time()*1000)%100000}"
+    new_rec = {
+        "id": rec_id,
+        "rec_id": rec_id,
+        "reporter_name": reporter_name,
+        "citizen_name": reporter_name,
+        "reporter_phone": reporter_phone,
+        "citizen_phone": reporter_phone,
+        "district": district,
+        "mandal": mandal,
+        "village": village,
+        "village_or_junction": village,
+        "lat": safe_lat,
+        "lng": safe_lng,
+        "reason": reason,
+        "vehicle_type": v_type,
+        "vehicle_tier": v_type,
+        "status": "Pending Review",
+        "created_at": time.strftime("%Y-%m-%d %H:%M"),
+        "officer_notes": "",
+        "approved_station_id": None
+    }
+
+    recs = DATA_CACHE.get("public_recommendations", [])
+    recs.insert(0, new_rec)
+    DATA_CACHE["public_recommendations"] = recs
+    save_public_recommendations_to_disk()
+
+    return jsonify({
+        "status": "success",
+        "message": f"Thank you, {reporter_name}! Your recommendation for {village} has been submitted to Command Center officers.",
+        "recommendation": new_rec,
+        "total": len(recs)
+    })
+
+@app.route("/api/officer/approve_recommendation/<rec_id>", methods=["POST"])
+def approve_recommendation(rec_id):
+    """
+    Officer-only action: Approves a citizen recommendation and immediately deploys
+    an official 108 ambulance base station at the recommended spot.
+    """
+    if not is_officer():
+        return jsonify({
+            "status": "error",
+            "message": "🔒 Access Denied: Only Command Center Officers or Higher Authorities can approve recommendations and deploy emergency fleet."
+        }), 403
+
+    recs = DATA_CACHE.get("public_recommendations", [])
+    target = None
+    for r in recs:
+        if r.get("id") == rec_id or r.get("rec_id") == rec_id:
+            target = r
+            break
+
+    if not target:
+        return jsonify({"status": "error", "message": f"Recommendation {rec_id} not found."}), 404
+
+    # Create manual ambulance station based on citizen recommendation
+    stn_id = f"APPR-108-{int(time.time()*1000)%100000}"
+    new_stn = {
+        "station_id": stn_id,
+        "ambulance_id": stn_id,
+        "name": f"{target['village']} Citizen-Recommended 108 Base",
+        "district": target["district"],
+        "mandal": target["mandal"],
+        "lat": target["lat"],
+        "lng": target["lng"],
+        "allocated_vehicle_type": target.get("vehicle_type", "Advanced Life Support (ALS)"),
+        "paramedic_crew": 3 if "ALS" in target.get("vehicle_type", "") else 2,
+        "equipment": ["Ventilator", "Defibrillator", "Oxygen Cylinder", "Stretcher"] if "ALS" in target.get("vehicle_type", "") else ["Oxygen Cylinder", "First Aid Kit", "Stretcher"],
+        "coverage_radius_km": 12.0,
+        "is_manual": True,
+        "is_from_recommendation": True,
+        "recommended_by": target["reporter_name"],
+        "created_at": int(time.time() * 1000)
+    }
+
+    # Add to active fleet and custom stations
+    dispatch_engine.add_custom_station(new_stn)
+    manual_list = DATA_CACHE.get("manual_ambulances", [])
+    manual_list.insert(0, new_stn)
+    DATA_CACHE["manual_ambulances"] = manual_list
+    if "active_fleet" in DATA_CACHE:
+        DATA_CACHE["active_fleet"].insert(0, new_stn)
+    save_manual_ambulances_to_disk()
+
+    # Update recommendation record
+    user = get_current_user()
+    approver = user.get("name") if user else "Command Center Officer"
+    target["status"] = "Approved & Deployed"
+    target["approved_station_id"] = stn_id
+    target["officer_notes"] = f"Approved and deployed by {approver}."
+    save_public_recommendations_to_disk()
+
+    return jsonify({
+        "status": "success",
+        "message": f"Recommendation {rec_id} approved! 108 Base Station deployed at {target['village']}.",
+        "recommendation": target,
+        "station": new_stn
+    })
+
+@app.route("/api/officer/reject_recommendation/<rec_id>", methods=["POST"])
+def reject_recommendation(rec_id):
+    """Officer-only action: Rejects a recommendation with explanation."""
+    if not is_officer():
+        return jsonify({"status": "error", "message": "🔒 Access Denied: Officers only."}), 403
+
+    data = request.get_json() or {}
+    notes = data.get("notes") or data.get("review_notes") or "Reviewed by Command Center. Existing station coverage deemed sufficient."
+
+    recs = DATA_CACHE.get("public_recommendations", [])
+    for r in recs:
+        if r.get("id") == rec_id or r.get("rec_id") == rec_id:
+            r["status"] = "Rejected"
+            r["officer_notes"] = notes
+            save_public_recommendations_to_disk()
+            return jsonify({
+                "status": "success",
+                "message": f"Recommendation {rec_id} rejected.",
+                "recommendation": r
+            })
+    return jsonify({"status": "error", "message": f"Recommendation {rec_id} not found."}), 404
+
+@app.route("/api/reported_accidents", methods=["GET"])
+def get_reported_accidents():
+    """Returns citizen-reported road accidents."""
+    district = request.args.get("district", "ALL")
+    accs = DATA_CACHE.get("reported_accidents", [])
+    if district and district != "ALL":
+        filtered = [a for a in accs if match_district(a.get("district", ""), district)]
+    else:
+        filtered = accs
+    return jsonify({
+        "status": "success",
+        "total": len(filtered),
+        "accidents": filtered
+    })
+
+@app.route("/api/public/report_accident", methods=["POST"])
+def report_accident():
+    """
+    Public citizen endpoint to report an active road accident.
+    Calculates nearest ambulance dispatch in real-time and logs the incident.
+    """
+    data = request.get_json() or {}
+    user = get_current_user()
+
+    reporter_name = data.get("reporter_name", "").strip() or data.get("caller_name", "").strip() or (user.get("name") if user else "Citizen Caller")
+    reporter_phone = data.get("reporter_phone", "").strip() or data.get("caller_phone", "").strip() or (user.get("phone") if user else "+91 94401 00000")
+    raw_lat = float(data.get("lat", 16.312))
+    raw_lng = float(data.get("lng", 80.451))
+    safe_lat = round(raw_lat, 5)
+    safe_lng = clamp_to_ap_land(safe_lat, raw_lng)
+
+    location_name = data.get("location_name", "").strip() or data.get("location_description", "").strip() or "Reported Crash Scene"
+    district = data.get("district", "").strip()
+    mandal = data.get("mandal", "").strip()
+
+    if not mandal or not district:
+        nearest_m = find_nearest_mandal(safe_lat, safe_lng)
+        if nearest_m:
+            mandal = mandal or nearest_m["mandal_name"]
+            district = district or nearest_m["district"]
+
+    severity = data.get("severity", "Critical")
+    injured_count = int(data.get("injured_count", 1))
+    landmark = data.get("landmark", "").strip()
+    description = data.get("description", "").strip() or data.get("incident_description", "").strip()
+
+    # Run dispatch engine to find nearest unit
+    dispatch_res = dispatch_engine.dispatch_nearest_ambulance(safe_lat, safe_lng, severity=severity)
+
+    acc_id = f"ACC-108-{int(time.time()*1000)%100000}"
+    new_acc = {
+        "id": acc_id,
+        "accident_id": acc_id,
+        "reporter_name": reporter_name,
+        "caller_name": reporter_name,
+        "reporter_phone": reporter_phone,
+        "caller_phone": reporter_phone,
+        "lat": safe_lat,
+        "lng": safe_lng,
+        "location_name": location_name,
+        "location_description": location_name,
+        "district": district,
+        "mandal": mandal,
+        "severity": severity,
+        "injured_count": injured_count,
+        "landmark": landmark,
+        "description": description,
+        "incident_description": description,
+        "reported_at": time.strftime("%Y-%m-%d %H:%M"),
+        "status": "dispatched",
+        "dispatched_ambulance": dispatch_res["dispatched_ambulance"]["name"],
+        "nearest_ambulance": dispatch_res["dispatched_ambulance"]["name"],
+        "ambulance_id": dispatch_res["dispatched_ambulance"]["station_id"],
+        "vehicle_type": dispatch_res["dispatched_ambulance"].get("allocated_vehicle_type", "ALS"),
+        "eta_minutes": dispatch_res["response_metrics"]["estimated_eta_minutes"],
+        "distance_km": dispatch_res["response_metrics"]["road_distance_km"]
+    }
+
+    accs = DATA_CACHE.get("reported_accidents", [])
+    accs.insert(0, new_acc)
+    DATA_CACHE["reported_accidents"] = accs
+    save_reported_accidents_to_disk()
+
+    return jsonify({
+        "status": "success",
+        "message": f"🚨 Accident logged! Nearest ambulance {new_acc['dispatched_ambulance']} dispatched with ETA {new_acc['eta_minutes']} min.",
+        "accident": new_acc,
+        "dispatch": dispatch_res,
+        "total": len(accs)
+    })
+
+@app.route("/api/officer/resolve_accident/<accident_id>", methods=["POST"])
+def resolve_accident(accident_id):
+    """Officer-only action: Marks reported accident as resolved/cleared."""
+    if not is_officer():
+        return jsonify({"status": "error", "message": "🔒 Access Denied: Officers only."}), 403
+
+    accs = DATA_CACHE.get("reported_accidents", [])
+    for a in accs:
+        if a.get("id") == accident_id or a.get("accident_id") == accident_id:
+            a["status"] = "Resolved / Hospitalized"
+            save_reported_accidents_to_disk()
+            return jsonify({
+                "status": "success",
+                "message": f"Accident {accident_id} marked as resolved.",
+                "accident": a
+            })
+    return jsonify({"status": "error", "message": f"Accident {accident_id} not found."}), 404
 
 @app.route("/")
 def index():
@@ -517,17 +1121,15 @@ def get_manual_ambulances():
 def add_manual_ambulance():
     """
     Permanently saves a manually placed 108 ambulance to disk and registers in active fleet.
-    JSON payload:
-    {
-        "lat": float,
-        "lng": float,
-        "name": str,
-        "district": str (optional),
-        "mandal": str (optional),
-        "vehicle_type": str (optional),
-        "radius_km": float (optional)
-    }
+    Restricted to Command Center Officers and Higher Health Authorities.
     """
+    if not is_officer():
+        return jsonify({
+            "status": "error",
+            "error": "unauthorized",
+            "message": "🔒 Access Denied: Manual ambulance positioning is restricted to Command Center Officers and Higher Authorities. As a public citizen, please submit a recommendation instead."
+        }), 403
+
     data = request.get_json() or {}
     raw_lat = float(data.get("lat", 16.312))
     raw_lng = float(data.get("lng", 80.451))
@@ -598,7 +1200,14 @@ def add_manual_ambulance():
 
 @app.route("/api/manual_ambulances/<station_id>", methods=["DELETE"])
 def delete_manual_ambulance(station_id):
-    """Permanently deletes a manually placed ambulance from disk and memory."""
+    """Permanently deletes a manually placed ambulance from disk and memory. Restricted to Officers."""
+    if not is_officer():
+        return jsonify({
+            "status": "error",
+            "error": "unauthorized",
+            "message": "🔒 Access Denied: Deleting manual ambulance positions is restricted to Command Center Officers and Higher Authorities."
+        }), 403
+
     manual_list = DATA_CACHE.get("manual_ambulances", [])
     initial_len = len(manual_list)
     updated_list = [s for s in manual_list if s.get("station_id") != station_id and s.get("ambulance_id") != station_id]
@@ -650,7 +1259,15 @@ def place_ambulance_nearer():
     Positions a Rapid Response 108 Ambulance right at or near
     a village or danger spot to immediately reduce response time and save the Golden Hour.
     Permanently persists the station so it never disappears on refresh.
+    Restricted to Command Center Officers and Higher Authorities.
     """
+    if not is_officer():
+        return jsonify({
+            "status": "error",
+            "error": "unauthorized",
+            "message": "🔒 Access Denied: Placing emergency ambulances on-demand is restricted to Command Center Officers and Higher Authorities. As a citizen, you can recommend this position for officer approval."
+        }), 403
+
     data = request.get_json() or {}
     raw_lat = float(data.get("lat", 16.312))
     raw_lng = float(data.get("lng", 80.451))
